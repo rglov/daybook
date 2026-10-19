@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="light dark" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src https://api.todoist.com; img-src 'self' data:;" />
+  <title>Daybook</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-mark">d</span><span>daybook</span></div>
+      <nav class="nav-list" aria-label="Main navigation">
+        <div class="nav-group"><div class="side-label">DAYBOOK</div>
+          <button class="nav-item active" data-view="today"><span class="nav-icon">◷</span><span>Today</span></button>
+          <button class="nav-item" data-view="journal"><span class="nav-icon">✎</span><span>Journal</span></button>
+          <button class="nav-item" data-view="meetings"><span class="nav-icon">▦</span><span>Meetings</span><span id="nav-meetings-count" class="nav-count">0</span></button>
+          <button class="nav-item" data-view="people"><span class="nav-icon">♙</span><span>People</span><span id="nav-people-count" class="nav-count">0</span></button>
+        </div>
+        <div class="nav-group"><div class="side-label">WORK</div>
+          <button class="nav-item" data-view="projects"><span class="nav-icon">▧</span><span>Projects</span><span id="nav-projects-count" class="nav-count">0</span></button>
+          <button class="nav-item" data-view="work"><span class="nav-icon">☷</span><span>Tasks</span><span id="nav-work-count" class="nav-count">0</span></button>
+        </div>
+        <div class="nav-group"><div class="side-label">WELLBEING</div>
+          <button class="nav-item" data-view="habits"><span class="nav-icon">◉</span><span>Protocols</span><span id="nav-habit-count" class="nav-count">0</span></button>
+          <button class="nav-item" data-view="workouts"><span class="nav-icon">↗</span><span>Workouts</span></button>
+        </div>
+      </nav>
+      <div class="sidebar-bottom">
+        <div class="vault-status"><span class="status-dot"></span><span id="vault-label">No vault connected</span></div>
+        <button id="settings-open" class="settings-link"><span>⚙</span> Settings</button>
+      </div>
+    </aside>
+
+    <main class="main-area">
+      <header class="topbar">
+        <div class="crumb"><span class="crumb-dot"></span><span id="workspace-crumb">TODAY</span></div>
+        <div class="top-actions"><span id="save-status" class="save-status">All changes saved</span><button class="icon-button" id="open-note" title="Open today's note in Obsidian" aria-label="Open today's note in Obsidian">↗</button></div>
+      </header>
+
+      <section id="setup-view" class="setup-view hidden">
+        <div class="setup-card">
+          <div class="setup-ornament">✳</div>
+          <p class="eyebrow">A calmer start to the day</p>
+          <h1>Your day, in one place.</h1>
+          <p class="setup-copy">Daybook reads and updates your Obsidian vault directly. Personal priorities and your journal stay in Markdown; calendar events and open work are gathered from their original apps.</p>
+          <button class="button primary" id="setup-vault">Choose Obsidian vault <span>→</span></button>
+          <p class="setup-footnote">Your notes stay on this device. Todoist is optional.</p>
+        </div>
+      </section>
+
+      <section id="today-view" class="page-view">
+        <div class="page-heading">
+          <div>
+            <p class="eyebrow" id="greeting">A new day, at your pace</p>
+            <h1 id="date-title">Today</h1>
+            <p class="heading-sub" id="date-subtitle">Make room for what matters.</p>
+          </div>
+          <div class="date-nav"><button class="icon-button" id="prev-day" aria-label="Previous day">←</button><input id="date-input" type="date" /><button class="icon-button" id="next-day" aria-label="Next day">→</button><button class="today-button" id="go-today">Today</button></div>
+        </div>
+
+        <aside class="day-focus-grid" aria-label="Daily thought">
+          <section class="quote-panel"><span class="quote-label">A NOTE FOR TODAY</span><blockquote id="day-quote"></blockquote></section>
+        </aside>
+
+        <section class="today-section day-planner-section">
+          <div class="today-section-heading"><div><p class="eyebrow">YOUR DAY</p><h2>Day plan</h2><p>Shape your day around calendar events, protocol routines, and timeblocked tasks.</p></div><div class="day-plan-counts"><span id="calendar-event-count" class="small-count">0 events</span><span id="day-work-count" class="small-count">0 selected</span><button id="agenda-refresh" class="text-button">Refresh ↻</button></div></div>
+          <div id="work-agenda-list" class="day-planner-layout">
+            <section class="day-timeline-column" aria-label="Day timeline">
+              <div id="calendar-status" class="calendar-status hidden"></div>
+              <div id="calendar-event-list" class="calendar-event-list"><div id="all-day-event-list" class="all-day-event-list"></div><div id="day-timeline-scroll" class="day-timeline-scroll"><div id="day-timeline" class="day-timeline"></div></div></div>
+            </section>
+            <aside class="unscheduled-tasks-panel"><div class="unscheduled-tasks-heading"><div><h3>Unscheduled</h3><p>Drag a task onto the timeline to make time for it.</p></div><span id="unscheduled-task-count" class="small-count">0</span></div><div id="unscheduled-task-list" class="unscheduled-task-list"></div></aside>
+          </div>
+        </section>
+
+        <footer class="page-footer"><span>Today is a practice, not a performance.</span><span id="daily-note-path"></span></footer>
+      </section>
+
+      <section id="journal-view" class="page-view hidden">
+        <div class="page-heading"><div><p class="eyebrow">A SPACE TO REFLECT</p><h1>Journal</h1><p id="journal-date-subtitle" class="heading-sub">Your entries for this day.</p></div><div class="date-nav"><button class="icon-button" id="journal-prev-day" aria-label="Previous day">←</button><input id="journal-date-input" type="date" aria-label="Journal date" /><button class="icon-button" id="journal-next-day" aria-label="Next day">→</button><button class="today-button" id="journal-go-today" type="button">Today</button></div></div>
+        <section class="journal-panel">
+          <div class="panel-head"><div class="panel-title"><span class="panel-icon rose">✎</span><div><h2>Daily journal</h2><p>Saved under # Log with a timestamp.</p></div></div><span class="markdown-tag">SAVED TO OBSIDIAN</span></div>
+          <textarea id="journal-input" placeholder="What’s on your mind today?"></textarea>
+          <label class="journal-tag-field">Tags<input id="journal-tags" type="text" placeholder="reflection, idea, work" autocomplete="off" /></label>
+          <div class="journal-compose-footer"><span id="journal-word-count">0 words</span><button id="journal-add" class="button secondary" type="button">Add entry</button></div>
+          <div id="journal-entries" class="journal-entries" aria-live="polite"></div>
+          <div class="journal-footer"><span>Entries are saved below in your daily note’s # Log section.</span></div>
+        </section>
+        <footer class="page-footer"><span>Your notes stay in Obsidian.</span><span id="journal-note-path"></span></footer>
+      </section>
+
+      <section id="projects-view" class="page-view hidden">
+        <div id="projects-board-content"><div class="page-heading habits-heading"><div><p class="eyebrow">MAKE PROGRESS VISIBLE</p><h1>Projects</h1><p class="heading-sub">Keep project outcomes and tasks in view.</p></div><button id="projects-add" class="button primary" type="button">New Project</button></div>
+        <section class="projects-overview panel"><div class="projects-overview-heading"><div><p class="eyebrow">YOUR WORK</p><h2>Project board</h2></div><label class="projects-search"><span aria-hidden="true">⌕</span><input id="projects-search" type="search" placeholder="Find a project" aria-label="Find a project"></label></div><div id="project-status-tabs" class="project-status-tabs" role="tablist" aria-label="Filter projects"><button type="button" class="active" data-project-filter="active" aria-selected="true">Active <span id="project-count-active">0</span></button><button type="button" data-project-filter="paused" aria-selected="false">Paused <span id="project-count-paused">0</span></button><button type="button" data-project-filter="completed" aria-selected="false">Completed <span id="project-count-completed">0</span></button><button type="button" data-project-filter="all" aria-selected="false">All projects <span id="project-count-all">0</span></button></div><div id="projects-list" class="projects-grid"></div><div id="projects-empty" class="projects-empty hidden"><span>▧</span><h3>No projects yet</h3><p>Create a project to capture its outcome, tasks, and milestones.</p><button class="button secondary" type="button" data-create-project>New project</button></div></section></div>
+        <section id="project-detail-page" class="project-detail-page hidden" aria-labelledby="project-detail-title">
+          <header class="project-detail-header"><div><button id="project-detail-back" class="project-detail-back" type="button">← All projects</button><p class="eyebrow">PROJECT OVERVIEW</p><h2 id="project-detail-title"></h2><p id="project-detail-subtitle"></p></div><div class="project-detail-actions"><button id="project-detail-open-note" class="button secondary" type="button">Open in Obsidian ↗</button><button id="project-detail-edit" class="button secondary" type="button">Edit project</button></div></header>
+          <div id="project-detail-stats" class="project-detail-stats"></div>
+          <section id="project-detail-overview" class="project-detail-overview"></section>
+          <div id="project-detail-people" class="project-detail-people hidden"></div>
+          <div class="project-detail-task-heading"><div><p class="eyebrow">PROJECT WORK</p><h3>Tasks</h3></div><button id="project-detail-manage-tasks" class="text-button" type="button">Manage tasks</button></div>
+          <div id="project-detail-focus-tabs" class="project-detail-focus-tabs" role="tablist" aria-label="Project task focus">
+            <button type="button" role="tab" aria-selected="true" class="active" data-project-focus="do">Do first <span data-project-focus-count="do">0</span></button>
+            <button type="button" role="tab" aria-selected="false" data-project-focus="schedule">Schedule <span data-project-focus-count="schedule">0</span></button>
+            <button type="button" role="tab" aria-selected="false" data-project-focus="delegate">Handle soon <span data-project-focus-count="delegate">0</span></button>
+            <button type="button" role="tab" aria-selected="false" data-project-focus="later">Later <span data-project-focus-count="later">0</span></button>
+          </div>
+          <div id="project-detail-task-groups" class="project-detail-task-groups"></div>
+        </section>
+        <section id="project-task-management-page" class="project-detail-page project-task-management-page hidden" aria-labelledby="project-task-management-title">
+          <header class="project-detail-header"><div><button id="project-task-management-back" class="project-detail-back" type="button">← Back to project</button><p class="eyebrow">PROJECT WORK</p><h2 id="project-task-management-title">Manage tasks</h2><p id="project-task-management-subtitle"></p></div></header>
+          <div class="project-task-management-toolbar"><div id="project-task-source-tabs" class="project-task-source-tabs" role="tablist" aria-label="Filter tasks by source"><button type="button" class="active" data-project-task-source="all" aria-selected="true">All</button><button type="button" data-project-task-source="todoist" aria-selected="false">Todoist</button><button type="button" data-project-task-source="obsidian" aria-selected="false">Obsidian</button><button type="button" data-project-task-source="reminder" aria-selected="false">Apple</button></div><label class="projects-search"><span aria-hidden="true">⌕</span><input id="project-task-search" type="search" placeholder="Find a task" aria-label="Find a task"></label></div>
+          <div id="project-task-management-options" class="project-task-options project-task-management-options"></div>
+          <footer class="project-task-management-footer"><span id="project-task-management-count">0 selected</span><div><button id="project-task-management-cancel" class="button secondary" type="button">Cancel</button><button id="project-task-management-save" class="button primary" type="button">Save tasks</button></div></footer>
+        </section>
+      </section>
+
+      <section id="work-view" class="page-view hidden">
+        <div class="page-heading habits-heading"><div><p class="eyebrow">One place for your open loops</p><h1>Tasks</h1><p class="heading-sub">Choose <strong>+ Today</strong> on any task to add it to the selected day’s plan.</p></div><div class="tasks-heading-actions"><button id="connect-todoist" class="button secondary">Settings <span>↗</span></button><button id="tasks-new-task" class="button primary" type="button">New Task</button></div></div>
+        <section class="panel due-today-panel"><div class="due-today-heading"><div><p class="eyebrow">YOUR OPEN LOOPS</p><h2>Today</h2><p>Tasks you’ve selected for today’s plan.</p></div><div class="due-today-actions"><span id="due-today-total" class="due-today-total">0</span><button id="due-today-refresh" class="text-button" aria-label="Refresh today’s tasks">Refresh ↻</button></div></div><div id="due-today-sources" class="due-today-sources"></div><div id="due-today-list" class="due-today-list"></div><div id="due-today-empty" class="due-today-empty hidden">No tasks selected. Choose + Today from a task to add it here.</div></section>
+        <div id="task-source-tabs" class="task-source-tabs" role="tablist" aria-label="Task sources">
+          <button class="task-source-tab active" type="button" role="tab" aria-selected="true" data-task-source="all">All <span data-task-source-count="all">0</span></button>
+          <button class="task-source-tab" type="button" role="tab" aria-selected="false" data-task-source="todoist">Todoist <span data-task-source-count="todoist">0</span></button>
+          <button class="task-source-tab" type="button" role="tab" aria-selected="false" data-task-source="obsidian">Obsidian <span data-task-source-count="obsidian">0</span></button>
+          <button class="task-source-tab" type="button" role="tab" aria-selected="false" data-task-source="reminders">Apple <span data-task-source-count="reminders">0</span></button>
+          <button class="task-source-tab" type="button" role="tab" aria-selected="false" data-task-source="wrike">Wrike <span data-task-source-count="wrike">0</span></button>
+          <button class="task-source-tab" type="button" role="tab" aria-selected="false" data-task-source="serviceNow">ServiceNow <span data-task-source-count="serviceNow">0</span></button>
+        </div>
+        <section id="all-tasks-focus" class="panel aggregate-task-panel work-source" data-task-source-panel="all">
+          <div class="aggregate-task-heading"><div><p class="eyebrow" id="aggregate-task-source-label">ALL SOURCES</p><h2>Focus by Urgency and Priority</h2><p>Due within seven days is urgent. High and urgent priority is important.</p></div><button id="aggregate-task-refresh" class="text-button" type="button">Refresh ↻</button></div>
+          <div id="aggregate-task-tabs" class="aggregate-task-tabs" role="tablist" aria-label="Eisenhower task groups">
+            <button class="aggregate-task-tab active" type="button" role="tab" aria-selected="true" data-unified-quadrant="do">Do first <span data-unified-count="do">0</span></button>
+            <button class="aggregate-task-tab" type="button" role="tab" aria-selected="false" data-unified-quadrant="schedule">Schedule <span data-unified-count="schedule">0</span></button>
+            <button class="aggregate-task-tab" type="button" role="tab" aria-selected="false" data-unified-quadrant="delegate">Handle soon <span data-unified-count="delegate">0</span></button>
+            <button class="aggregate-task-tab" type="button" role="tab" aria-selected="false" data-unified-quadrant="later">Later <span data-unified-count="later">0</span></button>
+          </div>
+          <div id="aggregate-task-list" class="aggregate-task-list"></div>
+          <div id="aggregate-task-empty" class="aggregate-task-empty hidden"></div>
+        </section>
+        <div id="todoist-module">
+        <details class="panel matrix-panel work-source" data-task-source-panel="todoist" open>
+          <summary class="panel-head work-source-summary"><span class="panel-icon blue">☷</span><div class="panel-title"><div><h2>Todoist tasks</h2><p id="todoist-subtitle">Tasks grouped by project and urgency.</p></div></div><span id="matrix-task-count" class="small-count">0 tasks</span><span class="work-source-chevron" aria-hidden="true">⌄</span></summary>
+          <div class="work-source-body"><div class="work-source-toolbar"><button id="todoist-add-task" class="button secondary" type="button">Add Todoist task</button><button id="matrix-refresh" class="text-button">Refresh ↻</button></div>
+          <div id="work-category-tabs" class="work-category-tabs" role="tablist" aria-label="Todoist task lists">
+            <button class="work-category active" type="button" role="tab" aria-selected="true" data-work-quadrant="do"><span>Do first</span><span class="work-category-count" data-count="do">0</span></button>
+            <button class="work-category" type="button" role="tab" aria-selected="false" data-work-quadrant="schedule"><span>Schedule</span><span class="work-category-count" data-count="schedule">0</span></button>
+            <button class="work-category" type="button" role="tab" aria-selected="false" data-work-quadrant="delegate"><span>Delegate</span><span class="work-category-count" data-count="delegate">0</span></button>
+            <button class="work-category" type="button" role="tab" aria-selected="false" data-work-quadrant="later"><span>Later / reconsider</span><span class="work-category-count" data-count="later">0</span></button>
+          </div>
+          <div id="todoist-task-list" class="todoist-task-list" role="tabpanel"></div>
+          <div id="matrix-empty" class="matrix-empty hidden">Connect Todoist and map your existing filters in Settings to see tasks here.</div>
+          </div>
+        </details>
+        </div>
+        <details class="panel obsidian-tasks-panel work-source" data-task-source-panel="obsidian">
+          <summary class="panel-head work-source-summary"><span class="panel-icon lilac">☷</span><div class="panel-title"><div><h2>Obsidian tasks</h2><p>Open checkboxes found in your Markdown notes.</p></div></div><span id="obsidian-task-count" class="small-count">0 tasks</span><span class="work-source-chevron" aria-hidden="true">⌄</span></summary>
+          <div class="work-source-body"><div class="work-source-toolbar"><button id="obsidian-add-task" class="button secondary" type="button">Add Obsidian task</button><button id="obsidian-refresh" class="text-button">Refresh ↻</button></div>
+          <div id="obsidian-task-list" class="obsidian-task-list"></div>
+          <div id="obsidian-task-empty" class="matrix-empty hidden">No open Markdown tasks found in this vault.</div>
+          </div>
+        </details>
+        <details class="panel obsidian-tasks-panel work-source" data-task-source-panel="reminders">
+          <summary class="panel-head work-source-summary"><span class="panel-icon peach">◷</span><div class="panel-title"><div><h2>Apple Reminders</h2><p>Open reminders from your Apple lists.</p></div></div><span id="reminder-task-count" class="small-count">0 reminders</span><span class="work-source-chevron" aria-hidden="true">⌄</span></summary>
+          <div class="work-source-body"><div class="work-source-toolbar"><button id="reminder-add-task" class="button secondary" type="button">Add reminder</button><button id="reminders-refresh" class="text-button">Refresh ↻</button></div>
+          <div id="reminder-task-list" class="obsidian-task-list"></div>
+          <div id="reminder-task-empty" class="matrix-empty hidden">No open Apple Reminders found.</div>
+          </div>
+        </details>
+      </section>
+
+      <section id="meetings-view" class="page-view hidden">
+        <div class="page-heading habits-heading"><div><p class="eyebrow">CALENDAR NOTES · OBSIDIAN</p><h1>Meetings</h1><p class="heading-sub">Meeting notes live in the <strong>Meetings</strong> folder of your vault.</p></div><div class="page-heading-actions"><button id="create-meeting-page" class="button primary" type="button">Create Meeting</button><button id="meetings-refresh" class="button secondary">Refresh ↻</button></div></div>
+        <div id="meetings-browser">
+          <section class="meeting-calendar panel" aria-label="Meetings by date">
+            <div class="meeting-calendar-heading"><div><p class="eyebrow">MEETINGS BY DATE</p><h2 id="meeting-month-label"></h2></div><div class="meeting-month-actions"><button id="meeting-clear-date" class="text-button" type="button">All dates</button><button id="meeting-month-prev" class="icon-button" type="button" aria-label="Previous month">←</button><button id="meeting-month-next" class="icon-button" type="button" aria-label="Next month">→</button></div></div>
+            <div class="meeting-calendar-grid" id="meeting-calendar-grid"></div>
+            <div class="meeting-calendar-legend"><span class="meeting-calendar-key"><i class="meeting-calendar-key-dot calendar-event-marker"></i>Calendar events</span><span class="meeting-calendar-key"><i class="meeting-calendar-key-dot meeting-note-marker"></i>Meeting notes</span><span id="meeting-date-selection" class="meeting-date-selection">Select a day to filter meeting notes</span></div>
+          </section>
+          <section id="meetings-list-panel" class="panel meetings-panel"><div class="meetings-panel-heading"><div><h2>Meeting notes</h2><p id="meetings-subtitle">Created from events in Today’s calendar.</p></div><div class="meetings-list-actions"><button class="meetings-starred-filter" id="meetings-starred-filter" type="button" aria-pressed="false">☆ Starred <span>0</span></button><span id="meetings-count" class="small-count">0 notes</span></div></div><div id="meetings-list" class="meetings-list"></div><div id="meetings-empty" class="empty-card hidden"><div class="empty-spark">▣</div><h2>No meeting notes yet</h2><p>Create a note from any event in Today’s calendar. Daybook stores it in your Obsidian vault’s Meetings folder.</p><button class="button secondary" id="meetings-go-today">Go to Today</button></div></section>
+        </div>
+        <section id="meeting-editor" class="panel meeting-editor hidden">
+          <div class="meeting-editor-toolbar"><button id="meeting-editor-back" class="text-button">← All meetings</button><div><button id="meeting-editor-open-obsidian" class="button secondary" type="button">Open in Obsidian ↗</button><button id="meeting-editor-save" class="button primary" type="button">Save meeting</button></div></div>
+          <header class="meeting-editor-heading"><p class="eyebrow">MEETING NOTES</p><h2 id="meeting-editor-title"></h2><p id="meeting-editor-meta"></p></header>
+          <section class="meeting-metadata" aria-label="Calendar event details"><p class="eyebrow">EVENT DETAILS</p><dl id="meeting-metadata-grid" class="meeting-metadata-grid"></dl></section>
+          <section id="one-on-one-related-work" class="one-on-one-related-work hidden"><header><div><p class="eyebrow">FOLLOW UP</p><h3 id="one-on-one-related-title">Projects &amp; tasks</h3><p>Open work linked to this person, for context during your conversation.</p></div></header><div class="one-on-one-related-grid"><section><h4>Projects</h4><div id="one-on-one-projects" class="one-on-one-related-list"></div></section><section><h4>Open tasks</h4><div id="one-on-one-tasks" class="one-on-one-related-list"></div></section></div></section>
+          <label class="meeting-notes-label" for="meeting-agenda-input">Agenda</label>
+          <textarea id="meeting-agenda-input" class="meeting-section-input meeting-agenda-input" placeholder="Topics to cover…"></textarea>
+          <label class="meeting-notes-label" for="meeting-notes-input">Notes</label>
+          <textarea id="meeting-notes-input" class="meeting-section-input meeting-notes-input" placeholder="Capture discussion and decisions…"></textarea>
+          <div class="meeting-action-heading"><label class="meeting-notes-label" for="meeting-action-items-input">Action items</label><button id="meeting-add-task" class="button secondary" type="button">Add Task</button></div>
+          <textarea id="meeting-action-items-input" class="meeting-section-input meeting-action-items-input" placeholder="Add one action item per line…"></textarea>
+          <p class="meeting-action-hint">Select an action item or leave the cursor in it, then choose Add Task to send it to Todoist.</p>
+          <footer class="meeting-editor-footer"><span id="meeting-editor-status" aria-live="polite">All changes saved to Obsidian.</span><button id="meeting-editor-reload" class="text-button hidden" type="button">Reload latest version</button></footer>
+        </section>
+      </section>
+
+      <section id="people-view" class="page-view hidden">
+        <div class="page-heading habits-heading"><div><p class="eyebrow">YOUR NETWORK</p><h1>People</h1><p class="heading-sub">People notes are stored in your Obsidian vault.</p></div><button id="people-add" class="button primary" type="button">Add person</button></div>
+        <section id="people-directory" class="panel people-panel"><div class="meetings-panel-heading"><div><h2>People</h2><p id="people-subtitle">Your people directory.</p></div><span id="people-count" class="small-count">0 people</span></div><div id="people-list" class="people-list"></div><div id="people-empty" class="empty-card hidden"><div class="empty-spark">♙</div><h2>No people yet</h2><p>Add people to reference them in meeting notes. Each person gets a note in your People folder.</p><button class="button secondary" type="button" data-create-person>Add a person</button></div></section>
+        <section id="person-detail" class="person-detail hidden"><button id="person-detail-back" class="project-detail-back" type="button">← All people</button><header class="person-detail-header"><span id="person-detail-avatar" class="person-avatar"></span><div><p class="eyebrow">PERSON</p><h2 id="person-detail-name"></h2><p id="person-detail-meta" class="heading-sub"></p></div><button id="person-detail-open-note" class="button secondary" type="button">Open note ↗</button></header><div id="person-association-tabs" class="person-association-tabs" role="tablist" aria-label="Filter person associations"><button type="button" class="active" data-person-filter="all" aria-selected="true">All <span id="person-count-all">0</span></button><button type="button" data-person-filter="meetings" aria-selected="false">Meetings <span id="person-meeting-count">0</span></button><button type="button" data-person-filter="tasks" aria-selected="false">Tasks <span id="person-task-count">0</span></button><button type="button" data-person-filter="projects" aria-selected="false">Projects <span id="person-project-count">0</span></button><label class="projects-search"><span aria-hidden="true">⌕</span><input id="person-association-search" type="search" placeholder="Find meetings, tasks, or projects" aria-label="Search this person’s linked work"></label></div><div id="person-task-filters" class="person-task-filters hidden"><div id="person-task-source-tabs" class="task-source-tabs" role="tablist" aria-label="Task sources"><button type="button" class="task-source-tab active" data-person-task-source="all" aria-selected="true">All <span data-person-task-source-count="all">0</span></button><button type="button" class="task-source-tab" data-person-task-source="todoist" aria-selected="false">Todoist <span data-person-task-source-count="todoist">0</span></button><button type="button" class="task-source-tab" data-person-task-source="obsidian" aria-selected="false">Obsidian <span data-person-task-source-count="obsidian">0</span></button><button type="button" class="task-source-tab" data-person-task-source="reminder" aria-selected="false">Apple <span data-person-task-source-count="reminder">0</span></button></div><div class="person-task-focus-row"><div id="person-task-urgency-tabs" class="aggregate-task-tabs" role="tablist" aria-label="Focus by urgency and priority"><button type="button" class="aggregate-task-tab active" data-person-task-urgency="all" aria-selected="true">All tasks <span id="person-task-urgency-all-count">0</span></button><button type="button" class="aggregate-task-tab" data-person-task-urgency="do" aria-selected="false">Do first <span data-person-task-urgency-count="do">0</span></button><button type="button" class="aggregate-task-tab" data-person-task-urgency="schedule" aria-selected="false">Schedule <span data-person-task-urgency-count="schedule">0</span></button><button type="button" class="aggregate-task-tab" data-person-task-urgency="delegate" aria-selected="false">Handle soon <span data-person-task-urgency-count="delegate">0</span></button><button type="button" class="aggregate-task-tab" data-person-task-urgency="later" aria-selected="false">Later <span data-person-task-urgency-count="later">0</span></button></div></div></div><section class="panel person-association-panel"><div class="person-association-panel-heading"><div><h3 id="person-association-title">All linked work</h3><p id="person-association-subtitle">Meetings, tasks, and projects connected to this person.</p></div><span id="person-association-visible-count" class="small-count">0 items</span></div><div id="person-associations" class="person-association-list"></div></section></section>
+      </section>
+
+      <section id="habits-view" class="page-view hidden">
+        <div class="page-heading habits-heading"><div><p id="protocol-page-eyebrow" class="eyebrow">WELLNESS</p><h1 id="protocol-page-title">Protocols</h1><p id="protocol-page-subtitle" class="heading-sub">Track adherence to your scheduled protocol over time.</p></div><button class="button primary" id="build-protocol">New cycle</button></div>
+        <div id="wellness-module-content">
+        <section class="panel protocol-adherence-calendar" aria-label="Protocol adherence by day">
+          <div class="meeting-calendar-heading"><div><p class="eyebrow">YOUR ADHERENCE</p><h2 id="protocol-calendar-month-label"></h2></div><div class="meeting-month-actions"><button class="icon-button" id="protocol-calendar-prev" type="button" aria-label="Previous month">←</button><button class="icon-button" id="protocol-calendar-next" type="button" aria-label="Next month">→</button></div></div>
+          <div class="meeting-calendar-grid protocol-calendar-grid" id="protocol-calendar-grid"></div>
+          <section class="protocol-day-expectations" aria-live="polite"><div class="protocol-day-expectations-heading"><h3 id="protocol-day-title">Expected for this day</h3><span id="protocol-adherence-summary" class="protocol-adherence-summary"></span></div><div id="protocol-day-items" class="protocol-day-items"></div></section>
+          <div class="meeting-calendar-legend protocol-calendar-legend"><span>Adherence</span><i class="protocol-adherence-swatch heat-0"></i><span>None</span><i class="protocol-adherence-swatch heat-1"></i><span>Some</span><i class="protocol-adherence-swatch heat-2"></i><span>Most</span><i class="protocol-adherence-swatch heat-3"></i><span>All</span></div>
+        </section>
+        <details class="panel protocol-cycle-panel" id="protocol-cycle-panel" open>
+          <summary class="protocol-cycle-heading"><span><span class="eyebrow">PLAN A DATE RANGE</span><strong>Protocol cycles</strong><span class="protocol-cycle-description">Set each bundle’s time here. It appears as a recurring task in the Day Plan on dates when its items are scheduled. Weekly items recur on the cycle’s start weekday.</span></span><i aria-hidden="true">⌄</i></summary>
+          <div class="protocol-cycle-content">
+            <div class="protocol-cycle-controls"><label>Cycle<select id="protocol-cycle-select" aria-label="Select protocol cycle"><option value="">Choose a cycle…</option></select></label><button class="button primary" id="protocol-cycle-add-bundle" type="button" disabled>Create bundle</button></div>
+            <form id="protocol-cycle-form" class="protocol-cycle-form hidden"><label>Cycle name<input id="protocol-cycle-name" maxlength="80" placeholder="Cycle 2026-11" required></label><label>Starts<input id="protocol-cycle-start" type="date" required></label><label>Ends<input id="protocol-cycle-end" type="date" required></label><button class="button primary" type="submit">Save cycle</button><button class="text-button" id="protocol-cycle-cancel" type="button">Cancel</button></form>
+            <div id="protocol-cycle-summary" class="protocol-cycle-summary hidden"></div>
+            <div id="protocol-cycle-bundles" class="protocol-cycle-bundles"></div>
+            <div id="protocol-cycle-empty" class="protocol-cycle-empty">Create a cycle with start and end dates to begin building your protocol.</div>
+          </div>
+        </details>
+        <details class="panel protocol-bundle-panel"><summary class="protocol-bundle-summary"><span><span class="eyebrow">OLDER SAVED BUNDLES</span><strong>Bundles from an earlier version</strong></span><span class="protocol-bundle-summary-hint">Keep using existing bundles <i aria-hidden="true">⌄</i></span></summary><div class="protocol-bundle-body"><div class="protocol-bundle-actions"><select id="protocol-bundle-select" aria-label="Saved protocol bundles"><option value="">Choose a bundle…</option></select><button class="button primary" id="protocol-bundle-commit" disabled>Commit to daily note</button></div><div id="protocol-bundle-preview" class="protocol-bundle-preview hidden"></div></div></details>
+        </div>
+      </section>
+      <section id="workouts-view" class="page-view hidden">
+        <div class="page-heading workouts-heading"><div><p class="eyebrow">TRAINING HISTORY</p><h1>Workouts</h1><p class="heading-sub">Your training history and progress from Hevy.</p></div><button id="hevy-refresh" class="button secondary">Refresh ↻</button></div>
+        <div id="workout-dashboard" class="workout-dashboard hidden">
+          <section class="workout-calendar" aria-label="Workouts this week">
+            <div class="workout-calendar-heading"><div><p class="eyebrow">WEEK AT A GLANCE</p><h2 id="workout-calendar-title">This week</h2></div><div class="workout-calendar-navigation"><button id="workout-week-prev" class="icon-button" type="button" aria-label="Previous week">‹</button><button id="workout-week-today" class="button secondary" type="button">This week</button><button id="workout-week-next" class="icon-button" type="button" aria-label="Next week">›</button></div></div>
+            <div id="workout-week-calendar" class="workout-calendar-days"></div>
+          </section>
+          <div class="workout-toolbar"><div><strong id="workout-period-title">Last 12 weeks</strong><span id="workout-history-count" class="workout-history-count"></span></div><label>Period<select id="workout-period"><option value="4">Last 4 weeks</option><option value="12" selected>Last 12 weeks</option><option value="all">All history</option></select></label></div>
+          <div class="workout-stat-grid">
+            <article class="panel workout-stat"><span>Workouts</span><strong id="workout-stat-count">0</strong><small id="workout-stat-count-note">in this period</small></article>
+            <article class="panel workout-stat"><span>Training time</span><strong id="workout-stat-time">0h</strong><small>total duration</small></article>
+            <article class="panel workout-stat"><span>Average session</span><strong id="workout-stat-average">0m</strong><small>per workout</small></article>
+            <article class="panel workout-stat"><span>Working sets</span><strong id="workout-stat-sets">0</strong><small id="workout-stat-volume">Across all exercises</small></article>
+          </div>
+          <div class="workout-content-grid">
+            <section class="panel workout-history-panel"><div class="workout-panel-heading"><div><h2>Training rhythm</h2><p id="workout-chart-subtitle">Workouts completed each week</p></div></div><div id="workout-week-chart" class="workout-week-chart"></div></section>
+            <section class="panel workout-history-panel"><div class="workout-panel-heading"><div><h2>Exercise volume</h2><p>Most trained exercises in this period</p></div></div><div id="workout-exercise-list" class="workout-exercise-list"></div><div id="workout-exercise-empty" class="workout-subtle hidden">Hevy has not returned exercise set details for these workouts.</div></section>
+          </div>
+          <section class="panel workout-history-panel workout-recent-panel"><div class="workout-panel-heading"><div><h2>Workout history</h2><p>Recent sessions and training details</p></div><span id="workout-list-count" class="small-count"></span></div><div id="workout-history-list" class="workout-history-list"></div></section>
+        </div>
+        <div id="hevy-workout-empty" class="empty-card workout-empty hidden"><div class="empty-spark">↗</div><h2>Connect Hevy to see your training</h2><p>Add your Hevy API key in Settings to load workout history, exercise sets, and progress stats.</p><button id="workout-open-settings" class="button primary">Open Settings</button></div>
+      </section>
+    </main>
+  </div>
+
+  <div id="workout-plan-modal" class="modal-backdrop hidden"><section class="modal workout-plan-modal" role="dialog" aria-modal="true" aria-labelledby="workout-plan-title"><div class="modal-heading"><div><p class="eyebrow">WEEKLY PLAN</p><h2 id="workout-plan-title">Plan a routine</h2><p id="workout-plan-date" class="field-note"></p></div><button class="icon-button close-modal" type="button" aria-label="Close">×</button></div><form id="workout-plan-form"><label class="full-label">Routine<input id="workout-plan-name" list="workout-routine-suggestions" required maxlength="120" placeholder="Push, Pull, Legs…" /><datalist id="workout-routine-suggestions"></datalist></label><div class="modal-footer"><button id="workout-plan-clear" class="text-button" type="button">Remove plan</button><button class="button primary" type="submit">Save routine</button></div></form></section></div>
+
+  <div id="settings-modal" class="modal-backdrop hidden">
+    <section class="modal settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+      <div class="modal-heading"><div><p class="eyebrow">MAKE IT YOURS</p><h2 id="settings-title">Settings</h2></div><button class="icon-button close-modal" aria-label="Close">×</button></div>
+      <div class="settings-section"><h3>Appearance</h3><p>Choose a light or dark surface and an accent color for Daybook.</p><div class="settings-fields two-col appearance-fields"><label>Mode<select id="appearance-mode"><option value="system">Match system</option><option value="light">Light</option><option value="dark">Dark</option></select></label><label>Color theme<select id="appearance-color"><option value="blue">Blue</option><option value="violet">Violet</option><option value="green">Green</option><option value="rose">Rose</option><option value="amber">Amber</option></select></label></div></div>
+      <div class="settings-section"><h3>Modules</h3><p>Choose which Daybook areas appear in the sidebar and load their connected content.</p><div class="module-settings-list">
+        <label class="module-setting"><span><strong>Habits</strong><small>Track habits from your Habits folder.</small></span><input id="module-habits" type="checkbox"></label>
+        <label class="module-setting"><span><strong>Wellness</strong><small>Manage your protocol from Wellness notes.</small></span><input id="module-wellness" type="checkbox"></label>
+        <label class="module-setting"><span><strong>Todoist</strong><small>Show Todoist tasks and quick add in Tasks.</small></span><input id="module-todoist" type="checkbox"></label>
+        <label class="module-setting"><span><strong>Wrike</strong><small>Show open tasks assigned to you.</small></span><input id="module-wrike" type="checkbox"></label>
+        <label class="module-setting"><span><strong>ServiceNow</strong><small>Show your incidents, requests, and request items.</small></span><input id="module-serviceNow" type="checkbox"></label>
+        <label class="module-setting"><span><strong>Hevy</strong><small>Show workout history and stats.</small></span><input id="module-hevy" type="checkbox"></label>
+      </div></div>
+      <div class="settings-section"><h3>Obsidian vault</h3><p>Choose the folder that contains your vault. Folder paths are relative to the vault and can include subfolders.</p><div class="vault-picker"><span id="settings-vault-path">No vault selected</span><button class="button secondary" id="change-vault">Choose folder</button></div><div class="settings-fields two-col"><label>Daily notes folder<input id="daily-folder-setting" value="Daily" /></label><label>Attachments folder<input id="attachments-folder-setting" value="Attachments" /></label><label>Habits folder<input id="habits-folder-setting" value="Habits" /></label><label>Wellness folder<input id="wellness-folder-setting" value="Wellness" /></label><label>Projects folder<input id="projects-folder-setting" value="PROJECTS" /></label><label>Meetings folder<input id="meetings-folder-setting" value="MEETINGS" /></label><label>People folder<input id="people-folder-setting" value="People" /></label></div></div>
+      <div class="settings-section"><h3>Todoist</h3><p>Connect with a personal API token from Todoist → Settings → Integrations → Developer.</p><label class="full-label">API token<input id="todoist-token" type="password" placeholder="Paste your token" autocomplete="off" /></label><p id="token-storage-note" class="field-note">The token is encrypted in the app’s local settings when your system supports secure storage.</p></div>
+      <div class="settings-section"><h3>Wrike</h3><p>Enter a Wrike permanent access token from your Wrike developer console. Daybook stores it securely on this Mac.</p><label class="full-label">Wrike API host<input id="wrike-host" value="https://www.wrike.com" placeholder="https://www.wrike.com" /></label><label class="full-label">Access token<input id="wrike-token" type="password" placeholder="Paste your Wrike token" autocomplete="off" /></label></div>
+      <div class="settings-section"><h3>ServiceNow</h3><p>Connect with an API key or OAuth bearer token. API keys require the ServiceNow API Key and HMAC Authentication feature to be enabled for your instance. OAuth bearer tokens may expire; Daybook stores the token securely on this Mac.</p><div class="settings-fields two-col"><label>Instance host<input id="servicenow-instance" placeholder="company.service-now.com" /></label><label>ServiceNow user name<input id="servicenow-user" autocomplete="username" /><small>Used to show records assigned to you.</small></label><label>Authentication<select id="servicenow-auth-type"><option value="apiKey">API key</option><option value="bearer">OAuth bearer token</option><option value="basic">Username and password</option></select></label></div><label id="servicenow-token-field" class="full-label">API key<input id="servicenow-token" type="password" placeholder="Paste your ServiceNow API key" autocomplete="off" /></label><label id="servicenow-password-field" class="full-label hidden">Password<input id="servicenow-password" type="password" autocomplete="current-password" /></label></div>
+      <div class="settings-section"><h3>Hevy workouts</h3><p>Connect with your Hevy API key. The public API requires Hevy Pro; Daybook stores the key securely on this Mac.</p><p><button id="hevy-api-link" class="text-button">Get an API key from Hevy ↗</button></p><label class="full-label">API key<input id="hevy-api-key" type="password" placeholder="Paste your Hevy API key" autocomplete="off" /></label></div>
+      <div class="settings-section"><h3>Task focus</h3><p>Todoist tasks are grouped using the same rules as your other task sources. P1 and P2 are important; due within seven days or overdue is urgent. Tasks without a due date are not urgent.</p></div>
+      <div class="modal-footer"><span id="settings-status" class="field-note"></span><button class="button primary" id="save-settings">Save settings</button></div>
+    </section>
+  </div>
+
+  <div id="create-meeting-modal" class="modal-backdrop hidden">
+    <section class="modal create-meeting-modal" role="dialog" aria-modal="true" aria-labelledby="create-meeting-title">
+      <div class="modal-heading"><div><p class="eyebrow">APPLE CALENDAR · OBSIDIAN</p><h2 id="create-meeting-title">Create meeting</h2><p class="field-note">Adds an event to your default Apple Calendar and creates a linked note in Meetings.</p></div><button class="icon-button close-modal" type="button" aria-label="Close">×</button></div>
+      <form id="create-meeting-form">
+        <label class="full-label">Title<input id="create-meeting-name" required maxlength="200" placeholder="Meeting name" /></label>
+        <label class="full-label">Meeting type<select id="create-meeting-type"><option>One on One</option><option>Project Meeting</option><option>Vendor Meeting</option><option selected>Other Meeting</option></select></label>
+        <div class="settings-fields two-col"><label>Date<input id="create-meeting-date" type="date" required /></label><label>Location<input id="create-meeting-location" maxlength="500" placeholder="Room, office, or link" /></label><label>Starts<input id="create-meeting-start" type="time" required /></label><label>Ends<input id="create-meeting-end" type="time" required /></label></div>
+        <fieldset class="meeting-people-picker"><legend>People</legend><p class="field-note">Choose people from your People folder.</p><div id="create-meeting-people" class="meeting-people-options"></div><button type="button" id="meeting-add-person" class="text-button">+ Add a person</button></fieldset>
+        <label class="full-label">Meeting URL <span class="field-note">Optional</span><input id="create-meeting-url" type="url" placeholder="https://…" /></label>
+        <label class="full-label">Agenda <span class="field-note">Added to the calendar event and meeting note</span><textarea id="create-meeting-agenda" rows="4" placeholder="Topics to cover…"></textarea></label>
+        <div class="modal-footer"><span id="create-meeting-status" class="field-note"></span><button id="create-meeting-save" class="button primary" type="submit">Create meeting</button></div>
+      </form>
+    </section>
+  </div>
+
+  <div id="person-modal" class="modal-backdrop hidden"><section class="modal person-modal" role="dialog" aria-modal="true" aria-labelledby="person-modal-title"><div class="modal-heading"><div><p class="eyebrow">PEOPLE</p><h2 id="person-modal-title">Add person</h2></div><button class="icon-button close-modal" type="button" aria-label="Close">×</button></div><form id="person-form"><label class="full-label">Name<input id="person-name" required maxlength="120" placeholder="Full name" /></label><div class="settings-fields two-col"><label>Role<input id="person-role" maxlength="200" placeholder="Optional" /></label><label>Organization<input id="person-organization" maxlength="200" placeholder="Optional" /></label></div><div class="modal-footer"><span id="person-status" class="field-note"></span><button class="button primary" type="submit">Create person</button></div></form></section></div>
+
+  <div id="task-create-choice-modal" class="modal-backdrop hidden">
+    <section class="modal task-create-choice-modal" role="dialog" aria-modal="true" aria-labelledby="task-create-choice-title">
+      <div class="modal-heading"><div><p class="eyebrow">ADD TO YOUR TASKS</p><h2 id="task-create-choice-title">New Task</h2><p class="field-note">Choose where you want this task to live.</p></div><button class="icon-button close-modal" type="button" aria-label="Close">×</button></div>
+      <div class="task-create-choices"><button type="button" data-create-task-source="todoist"><span class="task-choice-mark todoist">T</span><span><strong>Todoist</strong><small>Projects, due dates, and priorities</small></span><i>›</i></button><button type="button" data-create-task-source="obsidian"><span class="task-choice-mark obsidian">◈</span><span><strong>Obsidian</strong><small>Add a checkbox task to today’s note</small></span><i>›</i></button><button type="button" data-create-task-source="reminder"><span class="task-choice-mark reminder">◷</span><span><strong>Apple Reminders</strong><small>Add to your default Reminders list</small></span><i>›</i></button></div>
+    </section>
+  </div>
+
+  <div id="todoist-task-modal" class="modal-backdrop hidden">
+    <section class="modal todoist-task-modal" role="dialog" aria-modal="true" aria-labelledby="todoist-task-title">
+      <div class="modal-heading"><div><p class="eyebrow">TODOIST</p><h2 id="todoist-task-title">Add task</h2></div><button class="icon-button close-modal" aria-label="Close">×</button></div>
+      <form id="todoist-task-form">
+        <label class="todoist-field">Task name<input id="todoist-task-content" required maxlength="500" placeholder="What needs to get done?" /></label>
+        <div class="todoist-fields two-col">
+          <label class="todoist-field">Project<select id="todoist-task-project"><option value="">Inbox</option></select></label>
+          <label class="todoist-field">Section<select id="todoist-task-section"><option value="">No section</option></select></label>
+          <label class="todoist-field">Priority<select id="todoist-task-priority"><option value="1">Priority 4 · Normal</option><option value="2">Priority 3 · Medium</option><option value="3">Priority 2 · High</option><option value="4">Priority 1 · Urgent</option></select></label>
+          <label class="todoist-field">Due date<input id="todoist-task-date" type="date" /></label>
+          <label class="todoist-field">Due time <span class="field-note">Optional</span><input id="todoist-task-time" type="time" /></label>
+          <label class="todoist-field">Labels <span class="field-note">Comma separated</span><input id="todoist-task-labels" placeholder="work, follow-up" /></label>
+        </div>
+        <label class="todoist-field todoist-description">Description<textarea id="todoist-task-description" rows="3" placeholder="Add notes or details (optional)"></textarea></label>
+        <div class="modal-footer"><span id="todoist-task-status" class="field-note"></span><button class="button primary" id="todoist-task-save" type="submit">Add task</button></div>
+      </form>
+    </section>
+  </div>
+
+  <div id="task-properties-modal" class="modal-backdrop hidden">
+    <section class="modal task-properties-modal" role="dialog" aria-modal="true" aria-labelledby="task-properties-title">
+      <div class="modal-heading"><div><p class="eyebrow">TASK DETAILS</p><h2 id="task-properties-title">Set due date and priority</h2><p id="task-properties-source" class="field-note"></p></div><button class="icon-button close-modal" aria-label="Close">×</button></div>
+      <p id="task-properties-name" class="task-properties-name"></p>
+      <form id="task-properties-form"><label class="todoist-field">Due date<input id="task-properties-date" type="date"></label><label class="todoist-field">Priority<select id="task-properties-priority"><option value="1">Normal</option><option value="2">Medium</option><option value="3">High</option><option value="4">Urgent</option></select></label><div id="task-properties-focus" class="task-focus-preview" aria-live="polite"></div><label id="task-properties-project-field" class="todoist-field hidden">Project<select id="task-properties-project"><option value="">No project</option></select></label><fieldset class="task-people-field"><legend>People</legend><p class="field-note">Who is this task for or with?</p><details id="task-people-picker" class="people-multi-select"><summary><span id="task-people-summary">Choose people</span><i aria-hidden="true">⌄</i></summary><div id="task-people-choices" class="people-multi-select-options"></div></details></fieldset><div class="modal-footer"><span id="task-properties-status" class="field-note"></span><button id="task-properties-save" class="button primary" type="submit">Save task</button></div></form>
+    </section>
+  </div>
+
+  <div id="project-editor-modal" class="modal-backdrop hidden">
+    <section class="modal project-editor-modal" role="dialog" aria-modal="true" aria-labelledby="project-editor-title">
+      <div class="modal-heading"><div><p class="eyebrow">PROJECT TRACKING</p><h2 id="project-editor-title">New project</h2></div><button class="icon-button close-modal" type="button" aria-label="Close">×</button></div>
+      <form id="project-editor-form">
+        <label class="todoist-field">Project name<input id="project-name" required maxlength="120" placeholder="What are you building or moving forward?" /></label>
+        <div class="todoist-fields two-col"><label class="todoist-field">Status<select id="project-status"><option value="active">Active</option><option value="paused">Paused</option><option value="completed">Completed</option><option value="archived">Archived</option></select></label><label class="todoist-field">Priority<select id="project-priority"><option value="normal">Normal</option><option value="high">High</option><option value="low">Low</option></select></label><label class="todoist-field">Start date<input id="project-start-date" type="date" /></label><label class="todoist-field">Target date<input id="project-due-date" type="date" /></label></div>
+        <label class="todoist-field">Outcome / overview<textarea id="project-overview" rows="3" placeholder="What does done look like? Add useful context."></textarea></label>
+        <label class="todoist-field">Milestones <span class="field-note">One per line. Mark completed items with [x].</span><textarea id="project-milestones" rows="4" placeholder="[ ] Agree on scope&#10;[ ] Share first draft"></textarea></label>
+        <div class="todoist-field"><span>People</span><div id="project-people-choices" class="meeting-people-choices"></div><small class="field-note">People linked to this project.</small></div>
+        <div class="project-task-handoff"><span aria-hidden="true">☑</span><div><strong>Project tasks</strong><p>Save the project first, then manage and filter linked tasks on its project page.</p></div></div>
+        <div class="project-editor-footer"><button id="project-open-note" class="text-button hidden" type="button">Open note in Obsidian ↗</button><span></span><button id="project-save" class="button primary" type="submit">Create project</button></div>
+      </form>
+    </section>
+  </div>
+
+  <div id="native-task-modal" class="modal-backdrop hidden">
+    <section class="modal native-task-modal" role="dialog" aria-modal="true" aria-labelledby="native-task-title">
+      <div class="modal-heading"><div><p class="eyebrow" id="native-task-source">APPLE</p><h2 id="native-task-title">Add task</h2></div><button class="icon-button close-modal" aria-label="Close">×</button></div>
+      <form id="native-task-form"><label class="todoist-field" id="native-task-label">Task name<input id="native-task-name" required maxlength="500" placeholder="What needs to get done?" /></label><div class="todoist-fields two-col native-task-properties"><label class="todoist-field">Due date<input id="native-task-date" type="date" /></label><label class="todoist-field">Priority<select id="native-task-priority"><option value="1">Normal</option><option value="2">Medium</option><option value="3">High</option><option value="4">Urgent</option></select></label></div><div class="modal-footer"><span id="native-task-status" class="field-note"></span><button id="native-task-save" class="button primary" type="submit">Add task</button></div></form>
+    </section>
+  </div>
+
+  <div id="timeblock-modal" class="modal-backdrop hidden">
+    <section class="modal timeblock-modal" role="dialog" aria-modal="true" aria-labelledby="timeblock-title">
+      <div class="modal-heading"><div><p class="eyebrow">DAY PLAN</p><h2 id="timeblock-title">Schedule task</h2><p id="timeblock-task-name" class="field-note"></p></div><button class="icon-button close-modal" aria-label="Close">×</button></div>
+      <form id="timeblock-form"><label class="todoist-field">Start time<input id="timeblock-start" type="time" min="06:00" max="21:30" step="1800" required /></label><label class="todoist-field">Duration<select id="timeblock-duration"><option value="30">30 minutes</option><option value="45">45 minutes</option><option value="60">1 hour</option><option value="90">1 hour 30 minutes</option><option value="120">2 hours</option></select></label><div class="modal-footer"><span id="timeblock-status" class="field-note"></span><button id="timeblock-save" class="button primary" type="submit">Add to timeline</button></div></form>
+    </section>
+  </div>
+
+  <div id="protocol-modal" class="modal-backdrop hidden">
+    <section class="modal habit-modal" role="dialog" aria-modal="true" aria-labelledby="protocol-modal-title">
+      <div class="modal-heading"><div><p class="eyebrow">YOUR WELLNESS PLAN</p><h2 id="protocol-modal-title">Add protocol item</h2></div><button class="icon-button close-modal" aria-label="Close">×</button></div>
+      <form id="protocol-form"><label class="full-label">Name<input id="protocol-name" placeholder="Name of item" required maxlength="100" /></label><label class="full-label">Type<select id="protocol-category"><option value="peptide">Peptide</option><option value="supplement">Supplement</option><option value="bioregulator">Bioregulator</option><option value="prescription">Prescription</option></select></label><label class="full-label">Daily area<select id="protocol-timing"><option value="waking">Waking</option><option value="breakfast">Breakfast</option><option value="afternoon">Afternoon</option><option value="bedtime">Bedtime</option></select></label><label class="full-label">Frequency<select id="protocol-frequency"><option value="daily">Daily</option><option value="weekdays">Weekdays</option><option value="weekly">Weekly</option><option value="custom">Specific days…</option></select></label><div id="protocol-create-weekday-controls" class="protocol-weekday-selector hidden"><span>Take on</span><div class="protocol-weekday-options"><label><input type="checkbox" data-protocol-weekday="mon">Mon</label><label><input type="checkbox" data-protocol-weekday="tue">Tue</label><label><input type="checkbox" data-protocol-weekday="wed">Wed</label><label><input type="checkbox" data-protocol-weekday="thu">Thu</label><label><input type="checkbox" data-protocol-weekday="fri">Fri</label><label><input type="checkbox" data-protocol-weekday="sat">Sat</label><label><input type="checkbox" data-protocol-weekday="sun">Sun</label></div></div><label class="full-label">Notes (optional)<textarea id="protocol-description" rows="3" placeholder="Add your own notes or instructions"></textarea></label><div class="modal-footer"><span></span><button class="button primary" type="submit">Save to Wellness</button></div></form>
+    </section>
+  </div>
+
+  <div id="protocol-library-modal" class="modal-backdrop hidden">
+    <section class="modal protocol-library-modal" role="dialog" aria-modal="true" aria-labelledby="protocol-library-title">
+      <div class="modal-heading"><div><p class="eyebrow">BUILD A CYCLE BUNDLE</p><h2 id="protocol-library-title">Choose items and timing</h2><p id="protocol-library-month" class="field-note"></p></div><button class="icon-button close-modal" aria-label="Close">×</button></div>
+      <label class="protocol-cycle-bundle-name">Bundle name<input id="protocol-cycle-bundle-name" placeholder="e.g. Waking, Training days" maxlength="80"></label>
+      <label class="protocol-cycle-bundle-time">Time on Day Plan<input id="protocol-cycle-bundle-time" type="time" value="08:00" required></label>
+      <div class="protocol-library-toolbar"><input id="protocol-library-search" type="search" placeholder="Search items…" aria-label="Search Wellness items"><select id="protocol-library-category" aria-label="Filter by type"><option value="">All types</option><option value="peptide">Peptides</option><option value="supplement">Supplements</option><option value="bioregulator">Bioregulators</option><option value="prescription">Prescriptions</option></select></div>
+      <div class="protocol-library-help"><p>Set the bundle’s clock time for the Day Plan, then choose each item’s daily area and frequency. These choices are saved in the bundle and won’t change your Wellness notes.</p><span id="protocol-library-count"></span></div>
+      <div id="protocol-library-list" class="protocol-library-list"></div>
+      <div class="protocol-bundle-save"><span id="protocol-bundle-selection-count">0 items selected</span><button class="button secondary" id="new-protocol-item">New item</button><button class="button primary" id="protocol-cycle-bundle-save" type="button">Save bundle</button></div>
+      <div class="modal-footer"><button class="button secondary close-library">Cancel</button></div>
+    </section>
+  </div>
+
+  <div id="toast" class="toast hidden" role="status"></div>
+  <script src="renderer.js"></script>
+</body>
+</html>

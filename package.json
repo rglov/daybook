@@ -1,0 +1,13 @@
+{
+  "name": "obsidian-daybook",
+  "productName": "Daybook",
+  "version": "0.1.0",
+  "description": "A local daily planning and habit companion for an Obsidian vault and Todoist.",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^44.9.0"
+  }
+}
