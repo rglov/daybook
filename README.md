@@ -48,11 +48,13 @@ Daybook writes notes and task updates directly to the selected vault. Folder nam
 
 Daily journal entries are added under the daily note’s `# Log` heading with a `YYYYMMDDHHmmss` timestamp. Meeting notes and project notes are Markdown files in their configured folders. Tasks created in Obsidian are Markdown checkboxes; completing an Obsidian task updates its original note.
 
-Daybook stores protocol bundle definitions in `.daybook/protocol-bundles.json` inside the vault. Its local app preferences and caches are stored separately in Electron’s per-user app data folder.
+Daybook stores syncable app data in the visible `Daybook` folder in the vault: protocol bundles, protocol cycles, shared preferences (appearance, enabled modules, folder settings, routines, task filters, and workout plans), and cached workout history. Keep the vault in Obsidian Sync and choose that vault in Daybook on each device to sync this data. Daily notes, projects, meetings, people, protocol cycles, and Obsidian tasks are already stored in the vault. Existing data in the older hidden `.daybook` folder is copied into `Daybook` when the vault is opened; the old files are left in place as a backup.
 
 ## Credential storage
 
 Integration secrets are not kept in a project `.env` file. Daybook encrypts API tokens and passwords with Electron `safeStorage` before saving them in its local app settings. If secure storage is unavailable, Daybook refuses to save credentials. The `.gitignore` excludes `.env` files as an additional safeguard; never commit real tokens, passwords, or private keys.
+
+API keys, passwords, the local vault path, and macOS Calendar/Reminders permissions remain device-specific. Enter integration credentials in Settings on each device; they are not written into the synced vault.
 
 On macOS, the app data folder is typically:
 

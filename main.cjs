@@ -1,5 +1,6 @@
 const { app, BrowserWindow, dialog, ipcMain, nativeImage, safeStorage, shell } = require('electron');
 const fs = require('node:fs/promises');
+const { constants: fsConstants } = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const crypto = require('node:crypto');
@@ -60,32 +61,103 @@ function userConfigPath() {
   return path.join(app.getPath('userData'), 'settings.json');
 }
 
-function hevyWorkoutCachePath() {
-  return path.join(app.getPath('userData'), 'hevy-workouts-cache.json');
+function daybookDataFolder(vaultPath) {
+  return path.join(vaultPath, 'Daybook');
 }
 
-async function readHevyWorkoutCache(credentialHash = '') {
-  try {
-    const cached = JSON.parse(await fs.readFile(hevyWorkoutCachePath(), 'utf8'));
-    if (!Array.isArray(cached.workouts)) return null;
-    if (credentialHash && cached.credentialHash !== credentialHash) return null;
-    return cached;
-  } catch {
-    return null;
+async function migrateLegacyDaybookData(vaultPath) {
+  if (!vaultPath) return;
+  const legacyFolder = path.join(vaultPath, '.daybook');
+  const currentFolder = daybookDataFolder(vaultPath);
+  for (const name of ['protocol-bundles.json', 'protocol-cycles.json', 'settings.json', 'hevy-workouts-cache.json']) {
+    const source = path.join(legacyFolder, name);
+    const destination = path.join(currentFolder, name);
+    try {
+      await fs.copyFile(source, destination, fsConstants.COPYFILE_EXCL);
+    } catch (error) {
+      if (error.code !== 'EEXIST' && error.code !== 'ENOENT') throw error;
+    }
   }
 }
 
-async function writeHevyWorkoutCache(credentialHash, workouts, cachedAt) {
-  const file = hevyWorkoutCachePath();
+function hevyWorkoutCachePath(vaultPath = '') {
+  return vaultPath
+    ? path.join(daybookDataFolder(vaultPath), 'hevy-workouts-cache.json')
+    : path.join(app.getPath('userData'), 'hevy-workouts-cache.json');
+}
+
+function sharedSettingsPath(vaultPath) {
+  return path.join(daybookDataFolder(vaultPath), 'settings.json');
+}
+
+async function readSharedSettings(vaultPath) {
+  if (!vaultPath) return {};
+  try {
+    await migrateLegacyDaybookData(vaultPath);
+    const shared = JSON.parse(await fs.readFile(sharedSettingsPath(vaultPath), 'utf8'));
+    return shared && typeof shared === 'object' && !Array.isArray(shared) ? shared : {};
+  } catch {
+    return {};
+  }
+}
+
+function sharedSettingsFromConfig(config) {
+  return {
+    dailyFolder: config.dailyFolder,
+    attachmentsFolder: config.attachmentsFolder,
+    habitsFolder: config.habitsFolder,
+    projectsFolder: config.projectsFolder,
+    meetingsFolder: config.meetingsFolder,
+    peopleFolder: config.peopleFolder,
+    wellnessFolder: config.wellnessFolder,
+    workoutPlans: config.workoutPlans,
+    morningRoutine: config.morningRoutine,
+    eveningRoutine: config.eveningRoutine,
+    matrixFilters: config.matrixFilters,
+    modules: config.modules,
+    appearance: config.appearance
+  };
+}
+
+async function writeSharedSettings(vaultPath, config) {
+  if (!vaultPath) return;
+  await migrateLegacyDaybookData(vaultPath);
+  const file = sharedSettingsPath(vaultPath);
   await fs.mkdir(path.dirname(file), { recursive: true });
   const temporaryFile = `${file}.${process.pid}.tmp`;
-  await fs.writeFile(temporaryFile, JSON.stringify({ credentialHash, cachedAt, workouts }), 'utf8');
+  await fs.writeFile(temporaryFile, JSON.stringify(sharedSettingsFromConfig(config), null, 2), 'utf8');
+  await fs.rename(temporaryFile, file);
+}
+
+async function readHevyWorkoutCache(credentialHash = '', vaultPath = '') {
+  try {
+    const cached = JSON.parse(await fs.readFile(hevyWorkoutCachePath(vaultPath), 'utf8'));
+    if (!Array.isArray(cached.workouts)) return null;
+    if (credentialHash && cached.credentialHash && cached.credentialHash !== credentialHash) return null;
+    return cached;
+  } catch {
+    if (!vaultPath) return null;
+    try {
+      const cached = JSON.parse(await fs.readFile(hevyWorkoutCachePath(), 'utf8'));
+      if (!Array.isArray(cached.workouts)) return null;
+      if (credentialHash && cached.credentialHash && cached.credentialHash !== credentialHash) return null;
+      return cached;
+    } catch { return null; }
+  }
+}
+
+async function writeHevyWorkoutCache(workouts, cachedAt, vaultPath = '') {
+  const file = hevyWorkoutCachePath(vaultPath);
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  const temporaryFile = `${file}.${process.pid}.tmp`;
+  await fs.writeFile(temporaryFile, JSON.stringify({ cachedAt, workouts }), 'utf8');
   await fs.rename(temporaryFile, file);
 }
 
 async function readConfig() {
   try {
     const saved = JSON.parse(await fs.readFile(userConfigPath(), 'utf8'));
+    const shared = await readSharedSettings(saved.vaultPath || '');
     let todoistToken = '';
     let hevyApiKey = '';
     let wrikeToken = '';
@@ -102,16 +174,16 @@ async function readConfig() {
     if (saved.encryptedServiceNowToken && safeStorage.isEncryptionAvailable()) serviceNowToken = safeStorage.decryptString(Buffer.from(saved.encryptedServiceNowToken, 'base64'));
     return {
       vaultPath: saved.vaultPath || '',
-      dailyFolder: saved.dailyFolder || 'Daily',
-      attachmentsFolder: saved.attachmentsFolder || 'Attachments',
-      habitsFolder: saved.habitsFolder || 'Habits',
-      projectsFolder: (() => { try { return normalizeVaultFolder(saved.projectsFolder, 'PROJECTS'); } catch { return 'PROJECTS'; } })(),
-      meetingsFolder: (() => { try { return normalizeVaultFolder(saved.meetingsFolder, 'MEETINGS'); } catch { return 'MEETINGS'; } })(),
-      peopleFolder: (() => { try { return normalizeVaultFolder(saved.peopleFolder, 'People'); } catch { return 'People'; } })(),
-      workoutPlans: saved.workoutPlans && typeof saved.workoutPlans === 'object' && !Array.isArray(saved.workoutPlans) ? saved.workoutPlans : {},
-      morningRoutine: saved.morningRoutine || ['Drink water', 'Move for 10 minutes', 'Review today'],
-      eveningRoutine: saved.eveningRoutine || ['Reset my space', 'Reflect on the day', 'Prepare for tomorrow'],
-      matrixFilters: saved.matrixFilters || { do: '', schedule: '', delegate: '', later: '' },
+      dailyFolder: shared.dailyFolder || saved.dailyFolder || 'Daily',
+      attachmentsFolder: shared.attachmentsFolder || saved.attachmentsFolder || 'Attachments',
+      habitsFolder: shared.habitsFolder || saved.habitsFolder || 'Habits',
+      projectsFolder: (() => { try { return normalizeVaultFolder(shared.projectsFolder ?? saved.projectsFolder, 'PROJECTS'); } catch { return 'PROJECTS'; } })(),
+      meetingsFolder: (() => { try { return normalizeVaultFolder(shared.meetingsFolder ?? saved.meetingsFolder, 'MEETINGS'); } catch { return 'MEETINGS'; } })(),
+      peopleFolder: (() => { try { return normalizeVaultFolder(shared.peopleFolder ?? saved.peopleFolder, 'People'); } catch { return 'People'; } })(),
+      workoutPlans: (shared.workoutPlans ?? saved.workoutPlans) && typeof (shared.workoutPlans ?? saved.workoutPlans) === 'object' && !Array.isArray(shared.workoutPlans ?? saved.workoutPlans) ? (shared.workoutPlans ?? saved.workoutPlans) : {},
+      morningRoutine: Array.isArray(shared.morningRoutine ?? saved.morningRoutine) ? (shared.morningRoutine ?? saved.morningRoutine) : ['Drink water', 'Move for 10 minutes', 'Review today'],
+      eveningRoutine: Array.isArray(shared.eveningRoutine ?? saved.eveningRoutine) ? (shared.eveningRoutine ?? saved.eveningRoutine) : ['Reset my space', 'Reflect on the day', 'Prepare for tomorrow'],
+      matrixFilters: (shared.matrixFilters ?? saved.matrixFilters) && typeof (shared.matrixFilters ?? saved.matrixFilters) === 'object' ? (shared.matrixFilters ?? saved.matrixFilters) : { do: '', schedule: '', delegate: '', later: '' },
       calendarEnabled: Boolean(saved.calendarEnabled),
       calendarSupported: process.platform === 'darwin',
       todoistToken,
@@ -123,11 +195,11 @@ async function readConfig() {
       serviceNowAuthType: ['apiKey', 'bearer', 'basic'].includes(saved.serviceNowAuthType) ? saved.serviceNowAuthType : (saved.encryptedServiceNowPassword ? 'basic' : 'apiKey'),
       serviceNowToken,
       serviceNowPassword,
-      wellnessFolder: saved.wellnessFolder || 'Wellness',
-      modules: { habits: saved.modules?.habits !== false, wellness: saved.modules?.wellness !== false, todoist: saved.modules?.todoist !== false, hevy: saved.modules?.hevy !== false, wrike: saved.modules?.wrike !== false, serviceNow: saved.modules?.serviceNow !== false },
+      wellnessFolder: shared.wellnessFolder || saved.wellnessFolder || 'Wellness',
+      modules: { habits: (shared.modules ?? saved.modules)?.habits !== false, wellness: (shared.modules ?? saved.modules)?.wellness !== false, todoist: (shared.modules ?? saved.modules)?.todoist !== false, hevy: (shared.modules ?? saved.modules)?.hevy !== false, wrike: (shared.modules ?? saved.modules)?.wrike !== false, serviceNow: (shared.modules ?? saved.modules)?.serviceNow !== false },
       appearance: {
-        mode: ['system', 'light', 'dark'].includes(saved.appearance?.mode) ? saved.appearance.mode : 'system',
-        color: ['blue', 'violet', 'green', 'rose', 'amber'].includes(saved.appearance?.color) ? saved.appearance.color : 'blue'
+        mode: ['system', 'light', 'dark'].includes((shared.appearance ?? saved.appearance)?.mode) ? (shared.appearance ?? saved.appearance).mode : 'system',
+        color: ['blue', 'violet', 'green', 'rose', 'amber'].includes((shared.appearance ?? saved.appearance)?.color) ? (shared.appearance ?? saved.appearance).color : 'blue'
       }
     };
   } catch {
@@ -148,6 +220,9 @@ async function readConfig() {
 
 async function writeConfig(next) {
   const old = await readConfig();
+  const switchedVault = Boolean(next.vaultPath && next.vaultPath !== old.vaultPath);
+  const targetVaultSettings = switchedVault ? await readSharedSettings(next.vaultPath) : {};
+  const base = { ...old, ...targetVaultSettings };
   const token = next.todoistToken ?? old.todoistToken;
   const hevyApiKey = next.hevyApiKey ?? old.hevyApiKey;
   const wrikeToken = next.wrikeToken ?? old.wrikeToken;
@@ -158,26 +233,26 @@ async function writeConfig(next) {
   }
   const saved = {
     vaultPath: next.vaultPath ?? old.vaultPath,
-    dailyFolder: next.dailyFolder ?? old.dailyFolder,
-    attachmentsFolder: next.attachmentsFolder ?? old.attachmentsFolder,
-    habitsFolder: next.habitsFolder ?? old.habitsFolder,
-    projectsFolder: normalizeVaultFolder(next.projectsFolder ?? old.projectsFolder, 'PROJECTS'),
-    meetingsFolder: normalizeVaultFolder(next.meetingsFolder ?? old.meetingsFolder, 'MEETINGS'),
-    peopleFolder: normalizeVaultFolder(next.peopleFolder ?? old.peopleFolder, 'People'),
-    workoutPlans: Object.fromEntries(Object.entries(next.workoutPlans ?? old.workoutPlans ?? {}).filter(([date, routine]) => /^\d{4}-\d{2}-\d{2}$/.test(date) && typeof routine === 'string' && routine.trim()).slice(-370).map(([date, routine]) => [date, routine.trim().slice(0, 120)])),
-    wellnessFolder: next.wellnessFolder ?? old.wellnessFolder,
+    dailyFolder: next.dailyFolder ?? base.dailyFolder,
+    attachmentsFolder: next.attachmentsFolder ?? base.attachmentsFolder,
+    habitsFolder: next.habitsFolder ?? base.habitsFolder,
+    projectsFolder: normalizeVaultFolder(next.projectsFolder ?? base.projectsFolder, 'PROJECTS'),
+    meetingsFolder: normalizeVaultFolder(next.meetingsFolder ?? base.meetingsFolder, 'MEETINGS'),
+    peopleFolder: normalizeVaultFolder(next.peopleFolder ?? base.peopleFolder, 'People'),
+    workoutPlans: Object.fromEntries(Object.entries(next.workoutPlans ?? base.workoutPlans ?? {}).filter(([date, routine]) => /^\d{4}-\d{2}-\d{2}$/.test(date) && typeof routine === 'string' && routine.trim()).slice(-370).map(([date, routine]) => [date, routine.trim().slice(0, 120)])),
+    wellnessFolder: next.wellnessFolder ?? base.wellnessFolder,
     wrikeHost: normalizeWrikeHost(next.wrikeHost ?? old.wrikeHost),
     serviceNowInstance: normalizeServiceNowInstance(next.serviceNowInstance ?? old.serviceNowInstance),
     serviceNowUser: String(next.serviceNowUser ?? old.serviceNowUser).trim().slice(0, 200),
     serviceNowAuthType: ['apiKey', 'bearer', 'basic'].includes(next.serviceNowAuthType) ? next.serviceNowAuthType : old.serviceNowAuthType,
-    morningRoutine: next.morningRoutine ?? old.morningRoutine,
-    eveningRoutine: next.eveningRoutine ?? old.eveningRoutine,
-    matrixFilters: next.matrixFilters ?? old.matrixFilters,
+    morningRoutine: next.morningRoutine ?? base.morningRoutine,
+    eveningRoutine: next.eveningRoutine ?? base.eveningRoutine,
+    matrixFilters: next.matrixFilters ?? base.matrixFilters,
     calendarEnabled: next.calendarEnabled ?? old.calendarEnabled,
-    modules: { ...old.modules, ...(next.modules || {}) },
+    modules: { ...base.modules, ...(next.modules || {}) },
     appearance: {
-      mode: ['system', 'light', 'dark'].includes(next.appearance?.mode) ? next.appearance.mode : old.appearance.mode,
-      color: ['blue', 'violet', 'green', 'rose', 'amber'].includes(next.appearance?.color) ? next.appearance.color : old.appearance.color
+      mode: ['system', 'light', 'dark'].includes(next.appearance?.mode) ? next.appearance.mode : (base.appearance?.mode || 'system'),
+      color: ['blue', 'violet', 'green', 'rose', 'amber'].includes(next.appearance?.color) ? next.appearance.color : (base.appearance?.color || 'blue')
     },
     encryptedToken: token && safeStorage.isEncryptionAvailable()
       ? safeStorage.encryptString(token).toString('base64')
@@ -191,6 +266,7 @@ async function writeConfig(next) {
   };
   await fs.mkdir(path.dirname(userConfigPath()), { recursive: true });
   await fs.writeFile(userConfigPath(), JSON.stringify(saved, null, 2), 'utf8');
+  await writeSharedSettings(saved.vaultPath, saved);
   return { ...saved, calendarSupported: process.platform === 'darwin', todoistToken: token, hevyApiKey, wrikeToken, serviceNowToken, serviceNowPassword, wellnessFolder: saved.wellnessFolder, attachmentsFolder: saved.attachmentsFolder, workoutPlans: saved.workoutPlans || {} };
 }
 
@@ -1625,7 +1701,7 @@ async function handleListCommittedProtocol(date) {
 }
 
 function protocolBundleFile(config) {
-  return path.join(config.vaultPath, '.daybook', 'protocol-bundles.json');
+  return path.join(daybookDataFolder(config.vaultPath), 'protocol-bundles.json');
 }
 
 async function handleListProtocolBundles() {
@@ -1641,7 +1717,7 @@ async function handleListProtocolBundles() {
 }
 
 function protocolCycleFile(config) {
-  return path.join(config.vaultPath, '.daybook', 'protocol-cycles.json');
+  return path.join(daybookDataFolder(config.vaultPath), 'protocol-cycles.json');
 }
 
 async function handleListProtocolCycles() {
@@ -2260,7 +2336,7 @@ async function handleCompleteTask(id) {
 async function handleListHevyWorkouts() {
   const config = await readConfig();
   const credentialHash = config.hevyApiKey ? crypto.createHash('sha256').update(config.hevyApiKey).digest('hex') : '';
-  const cached = await readHevyWorkoutCache(credentialHash);
+  const cached = await readHevyWorkoutCache(credentialHash, config.vaultPath);
   if (!config.hevyApiKey) return { connected: false, workouts: cached?.workouts || [], cachedAt: cached?.cachedAt || '', fromCache: Boolean(cached), error: cached ? 'Showing saved workout history. Add your Hevy API key to sync new sessions.' : '' };
   const pageSize = 10;
   const pageLimit = 100;
@@ -2313,7 +2389,7 @@ async function handleListHevyWorkouts() {
       };
     });
     const cachedAt = new Date().toISOString();
-    try { await writeHevyWorkoutCache(credentialHash, normalizedWorkouts, cachedAt); } catch {}
+    try { await writeHevyWorkoutCache(normalizedWorkouts, cachedAt, config.vaultPath); } catch {}
     return { connected: true, workouts: normalizedWorkouts, cachedAt, fromCache: false, error: '' };
   } catch (error) {
     if (cached) return { connected: true, workouts: cached.workouts, cachedAt: cached.cachedAt || '', fromCache: true, error: error.message };
@@ -2324,7 +2400,7 @@ async function handleListHevyWorkouts() {
 async function handleGetCachedHevyWorkouts() {
   const config = await readConfig();
   const credentialHash = config.hevyApiKey ? crypto.createHash('sha256').update(config.hevyApiKey).digest('hex') : '';
-  const cached = await readHevyWorkoutCache(credentialHash);
+  const cached = await readHevyWorkoutCache(credentialHash, config.vaultPath);
   return {
     connected: Boolean(config.hevyApiKey),
     workouts: cached?.workouts || [],
