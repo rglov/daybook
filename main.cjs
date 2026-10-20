@@ -382,6 +382,10 @@ function parseLogEntries(bodyLines) {
       entries.push(current);
     } else if (current && /^Tags:\s*(?:#[^\s]+\s*)+$/i.test(line)) {
       current.tags = line.replace(/^Tags:\s*/i, '').split(/\s+/).map((tag) => tag.replace(/^#+/, '').trim()).filter(Boolean);
+    } else if (current && /^Context:\s*/i.test(line)) {
+      current.contextText = line.replace(/^Context:\s*/i, '').trim();
+    } else if (current && /^<!-- daybook-journal-context:[A-Za-z0-9+/=]+ -->$/.test(line)) {
+      try { current.context = JSON.parse(Buffer.from(line.match(/^<!-- daybook-journal-context:([A-Za-z0-9+/=]+) -->$/)[1], 'base64').toString('utf8')) || []; } catch { current.context = []; }
     } else if (current) {
       current.text += `${current.text ? '\n' : ''}${line}`;
     } else {
@@ -391,7 +395,7 @@ function parseLogEntries(bodyLines) {
   return { entries, legacy: legacy.join('\n').trim() };
 }
 
-function replaceLogEntry(bodyLines, timestamp, journal, tags = []) {
+function replaceLogEntry(bodyLines, timestamp, journal, tags = [], context = []) {
   const lines = [...bodyLines];
   const start = lines.findIndex((line) => line.startsWith(timestamp) && /^\d{14}(?:\s|$)/.test(line));
   let end = start < 0 ? -1 : lines.length;
@@ -406,6 +410,14 @@ function replaceLogEntry(bodyLines, timestamp, journal, tags = []) {
   }
   const entryLines = [`${timestamp} ${journal.trim()}`];
   if (tags.length) entryLines.push(`Tags: ${tags.map((tag) => `#${tag}`).join(' ')}`);
+  if (context.length) {
+    const labels = context.map((item) => item.relativePath
+      ? `[[${String(item.relativePath).replace(/\\/g, '/').replace(/\.md$/i, '')}|${String(item.label || 'Open note').replace(/[|\]\\]/g, '')}]]`
+      : `${String(item.source || item.type || 'Linked').replace(/[^\w -]/g, '')}: ${String(item.label || '').replace(/[\r\n]/g, ' ')}`);
+    entryLines.push(`Context: ${labels.join(', ')}`);
+    const encoded = Buffer.from(JSON.stringify(context)).toString('base64');
+    entryLines.push(`<!-- daybook-journal-context:${encoded} -->`);
+  }
   if (start >= 0) lines.splice(start, end - start, ...entryLines);
   else {
     while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
@@ -415,11 +427,11 @@ function replaceLogEntry(bodyLines, timestamp, journal, tags = []) {
   return lines;
 }
 
-function updateLogSection(content, journal, timestamp = '', tags = []) {
+function updateLogSection(content, journal, timestamp = '', tags = [], context = []) {
   const section = logSectionLines(content);
   if (!timestamp || !journal.trim()) {
     if (!journal.trim() && timestamp && section.heading >= 0) {
-      const nextBody = replaceLogEntry(section.body, timestamp, '', []);
+      const nextBody = replaceLogEntry(section.body, timestamp, '', [], []);
       return [...section.lines.slice(0, section.heading + 1), ...nextBody, ...section.lines.slice(section.end)].join('\n');
     }
     if (!journal.trim()) return content;
@@ -428,7 +440,7 @@ function updateLogSection(content, journal, timestamp = '', tags = []) {
   const parsed = parseLogEntries(section.body);
   const body = !timestamp && section.heading >= 0 && !parsed.entries.length && parsed.legacy === journal.trim()
     ? [`${entryTimestamp} ${journal.trim()}`]
-    : replaceLogEntry(section.body, entryTimestamp, journal, tags);
+    : replaceLogEntry(section.body, entryTimestamp, journal, tags, context);
   if (section.heading < 0) {
     const prefix = content.trimEnd();
     return `${prefix ? `${prefix}\n\n` : ''}# Log\n\n${body.join('\n').trim()}\n`;
@@ -713,7 +725,7 @@ async function handleGetDay(date) {
   const parsedLog = parseLogEntries(log.body);
   const today = date.replace(/-/g, '');
   const todayEntries = parsedLog.entries.filter((entry) => entry.timestamp.startsWith(today));
-  day.journalEntries = todayEntries.map((entry) => ({ timestamp: entry.timestamp, text: entry.text.trim(), tags: entry.tags || [] }));
+  day.journalEntries = todayEntries.map((entry) => ({ timestamp: entry.timestamp, text: entry.text.trim(), tags: entry.tags || [], context: entry.context || [] }));
   const todayEntry = todayEntries.at(-1);
   if (todayEntry) {
     day.journal = todayEntry.text.trim();
@@ -1590,7 +1602,17 @@ async function handleSaveDay(date, day, expectedBlock = '') {
   const journalEntries = Array.isArray(day.journalEntries)
     ? day.journalEntries.filter((entry) => entry.timestamp && entry.text?.trim())
     : (day.journalTimestamp && day.journal?.trim() ? [{ timestamp: day.journalTimestamp, text: day.journal }] : []);
-  for (const entry of journalEntries) updated = updateLogSection(updated, entry.text, entry.timestamp, Array.isArray(entry.tags) ? entry.tags : []);
+  const retained = new Set(journalEntries.map((entry) => entry.timestamp));
+  const logSection = logSectionLines(updated);
+  if (logSection.heading >= 0) {
+    const prefix = date.replace(/-/g, '');
+    let body = [...logSection.body];
+    for (const entry of parseLogEntries(body).entries) {
+      if (entry.timestamp.startsWith(prefix) && !retained.has(entry.timestamp)) body = replaceLogEntry(body, entry.timestamp, '', [], []);
+    }
+    updated = [...logSection.lines.slice(0, logSection.heading + 1), ...body, ...logSection.lines.slice(logSection.end)].join('\n');
+  }
+  for (const entry of journalEntries) updated = updateLogSection(updated, entry.text, entry.timestamp, Array.isArray(entry.tags) ? entry.tags : [], Array.isArray(entry.context) ? entry.context : []);
   await fs.writeFile(full, updated, 'utf8');
   const block = updated.match(/<!-- daybook:start -->[\s\S]*?<!-- daybook:end -->/)?.[0] || '';
   return { relativePath: relative, block };

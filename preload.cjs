@@ -1,6 +1,7 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('daybook', {
+  platform: process.platform,
   getConfig: () => ipcRenderer.invoke('config:get'),
   saveConfig: (config) => ipcRenderer.invoke('config:save', config),
   openHevyDeveloperSettings: () => ipcRenderer.invoke('hevy:developer-settings'),

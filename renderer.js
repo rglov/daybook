@@ -1,5 +1,6 @@
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
+if (window.daybook?.platform === 'darwin') document.documentElement.classList.add('macos');
 const DAILY_QUOTES = [
   'Make room for the kind of day you want to remember.',
   'Small steps count, especially on ordinary days.',
@@ -16,8 +17,22 @@ const DAILY_QUOTES = [
 const state = {
   config: null,
   date: localDateString(new Date()),
+  weekStart: weekStartFor(localDateString(new Date())),
+  weekData: [],
+  weekLoading: false,
+  weekLoadId: 0,
+  weekTaskDraft: null,
+  weekTaskSourceFilter: 'all',
+  weekTaskPage: 0,
+  weekTaskSearch: '',
+  editingJournalIndex: null,
+  linkingJournalIndex: null,
+  journalContextCandidates: [],
+  collapsedWeekProjects: new Set(),
   day: { plan: [], selectedWork: [], calendarChecks: {}, morning: [], evening: [], journal: '' },
   habits: [],
+  habitCalendarStart: new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate() - 14),
+  habitCalendarDays: 15,
   protocolItems: [],
   committedProtocolPaths: [],
   committedProtocolTimings: {},
@@ -98,6 +113,29 @@ function localDateString(date) {
   const m = String(date.getMonth() + 1).padStart(2, '0');
   const d = String(date.getDate()).padStart(2, '0');
   return `${y}-${m}-${d}`;
+}
+
+function shiftDate(value, days) {
+  const date = new Date(`${value}T12:00:00`);
+  date.setDate(date.getDate() + days);
+  return localDateString(date);
+}
+
+function weekStartFor(value) {
+  const date = new Date(`${value}T12:00:00`);
+  date.setDate(date.getDate() - date.getDay());
+  return localDateString(date);
+}
+
+function weekDates(start = state.weekStart) {
+  return Array.from({ length: 7 }, (_, index) => shiftDate(start, index));
+}
+
+function isoWeekNumber(value) {
+  const date = new Date(`${value}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + 4 - (date.getUTCDay() || 7));
+  const yearStart = new Date(Date.UTC(date.getUTCFullYear(), 0, 1));
+  return Math.ceil((((date - yearStart) / 86400000) + 1) / 7);
 }
 
 function applyAppearance(appearance = state.config?.appearance || {}) {
@@ -221,11 +259,6 @@ function saveTimeBlock(index, startValue, durationValue) {
   const duration = Number(durationValue);
   if (!Number.isFinite(start) || !Number.isFinite(duration) || start < DAY_START_MINUTES || start + duration > DAY_END_MINUTES) {
     $('#timeblock-status').textContent = 'Choose a time between 6:00 AM and 10:00 PM.';
-    return false;
-  }
-  const conflict = timeblockConflict(start, duration, index);
-  if (conflict) {
-    $('#timeblock-status').textContent = conflict;
     return false;
   }
   task.timeBlock = { start: startValue, duration };
@@ -371,6 +404,61 @@ function workSelection(source, task) {
   return { source, relativePath: task.relativePath, line: task.line, text: task.text, fileName: task.fileName };
 }
 
+function weekTaskButton(source, task) {
+  const attrs = source === 'obsidian'
+    ? `data-week-file="${escapeHtml(task.relativePath)}" data-week-text="${escapeHtml(task.text)}"`
+    : `data-week-id="${escapeHtml(task.id)}"`;
+  return `<button class="select-week-button" type="button" data-select-week="${source}" ${attrs}>+ This Week</button>`;
+}
+
+function openWeekTaskPicker(source, task) {
+  state.weekTaskDraft = { source, task };
+  $('#week-task-name').textContent = task.content || task.text || task.title || 'Selected task';
+  $('#week-task-dates').innerHTML = weekDates().map((date) => {
+    const selected = (state.weekData.find((entry) => entry.date === date)?.day?.selectedWork || []).some((item) => workSelectionKey(item) === workSelectionKey(workSelection(source, task)));
+    const label = prettyDate(date, { weekday: 'long', month: 'short', day: 'numeric' });
+    const isToday = date === localDateString(new Date());
+    return `<button class="week-task-date ${selected ? 'already-planned' : ''}" type="button" data-week-task-date="${date}" ${selected ? 'disabled' : ''}><span><strong>${escapeHtml(label)}${isToday ? ' · Today' : ''}</strong><small>${selected ? 'Already in this day’s plan' : 'Add task to this day'}</small></span><i>${selected ? '✓' : '＋'}</i></button>`;
+  }).join('');
+  $('#week-task-modal').classList.remove('hidden');
+}
+
+function openWeekTaskFromButton(button) {
+  const source = button.dataset.selectWeek;
+  const task = source === 'todoist'
+    ? Object.values(state.tasksByQuadrant).flat().find((item) => String(item.id) === button.dataset.weekId)
+    : source === 'reminder'
+      ? state.reminders.find((item) => String(item.id) === button.dataset.weekId)
+      : state.obsidianTasks.find((item) => item.relativePath === button.dataset.weekFile && item.text === button.dataset.weekText);
+  if (task) openWeekTaskPicker(source, task);
+}
+
+async function addTaskToWeekDate(date) {
+  const draft = state.weekTaskDraft;
+  if (!draft) return;
+  const selected = workSelection(draft.source, draft.task);
+  try {
+    const record = await window.daybook.getDay(date);
+    const day = record.day || { plan: [], selectedWork: [], calendarChecks: {}, morning: [], evening: [], journal: '' };
+    let added = false;
+    day.selectedWork ||= [];
+    if (day.selectedWork.some((item) => workSelectionKey(item) === workSelectionKey(selected))) {
+      showToast('This task is already in that day’s plan.');
+    } else {
+      day.selectedWork.push(selected);
+      await window.daybook.saveDay(date, day, record.block || '');
+      added = true;
+      await loadDate(date);
+      showToast(`Added to ${prettyDate(date, { weekday: 'long' })}’s plan.`);
+    }
+    $('#week-task-modal').classList.add('hidden');
+    state.weekTaskDraft = null;
+    if (state.activeView === 'week' && added) loadWeek();
+  } catch (error) {
+    showToast(error.message, true);
+  }
+}
+
 function isSelectedForToday(item) {
   const key = workSelectionKey(item);
   return (state.day.selectedWork || []).some((selected) => workSelectionKey(selected) === key);
@@ -444,7 +532,7 @@ function renderTasks() {
         const due = task.due?.date ? `<span class="matrix-task-meta">${escapeHtml(task.due.string || task.due.date)}</span>` : '';
         const priority = task.priority > 1 ? `<span class="matrix-task-priority">P${5 - task.priority}</span>` : '';
         const selected = isSelectedForToday(workSelection('todoist', task));
-        return `<div class="matrix-task-row ${task.checked ? 'done' : ''}"><button class="select-today-button ${selected ? 'selected' : ''}" data-select-today data-select-source="todoist" data-select-id="${escapeHtml(task.id)}" aria-pressed="${selected}">${selected ? '✓ Today' : '+ Today'}</button><span class="matrix-task-copy"><span class="matrix-task-name">${escapeHtml(task.content)}</span><span class="matrix-task-details">${due}${priority}</span></span><span class="task-origin-tag todoist" title="Todoist">Todoist</span><button class="text-button" type="button" data-edit-task-properties="todoist" data-task-id="${escapeHtml(task.id)}">Edit</button><button class="task-open-link" type="button" data-open-native-task="todoist" data-task-id="${escapeHtml(task.id)}" aria-label="Open ${escapeHtml(task.content)} in Todoist" title="Open in Todoist">↗</button><input type="checkbox" data-task="${escapeHtml(task.id)}" aria-label="Complete ${escapeHtml(task.content)}"></div>`;
+        return `<div class="matrix-task-row ${task.checked ? 'done' : ''}"><button class="select-today-button ${selected ? 'selected' : ''}" data-select-today data-select-source="todoist" data-select-id="${escapeHtml(task.id)}" aria-pressed="${selected}">${selected ? '✓ Today' : '+ Today'}</button>${weekTaskButton('todoist', task)}<span class="matrix-task-copy"><span class="matrix-task-name">${escapeHtml(task.content)}</span><span class="matrix-task-details">${due}${priority}</span></span><span class="task-origin-tag todoist" title="Todoist">Todoist</span><button class="text-button" type="button" data-edit-task-properties="todoist" data-task-id="${escapeHtml(task.id)}">Edit</button><button class="task-open-link" type="button" data-open-native-task="todoist" data-task-id="${escapeHtml(task.id)}" aria-label="Open ${escapeHtml(task.content)} in Todoist" title="Open in Todoist">↗</button><input type="checkbox" data-task="${escapeHtml(task.id)}" aria-label="Complete ${escapeHtml(task.content)}"></div>`;
       }).join('')}</div>
     </section>`;
   }).join('');
@@ -472,7 +560,7 @@ function renderObsidianTasks() {
         const priority = normalizedTaskPriority(task, 'obsidian');
         const priorityLabel = ({ 1: 'Normal', 2: 'Medium', 3: 'High', 4: 'Urgent' })[priority] || 'Normal';
         const due = task.dueDate ? `<time class="task-property-chip">${escapeHtml(task.dueDate)}</time>` : '';
-        return `<div class="obsidian-task-row"><button class="select-today-button ${selected ? 'selected' : ''}" data-select-today data-select-source="obsidian" data-select-file="${escapeHtml(task.relativePath)}" data-select-text="${escapeHtml(task.text)}" aria-pressed="${selected}">${selected ? '✓ Today' : '+ Today'}</button><input type="checkbox" data-obsidian-file="${escapeHtml(task.relativePath)}" data-obsidian-line="${task.line}" data-obsidian-text="${escapeHtml(task.text)}" aria-label="Complete ${escapeHtml(task.text)}"><span class="obsidian-task-text">${escapeHtml(task.displayText || task.text)}</span><span class="task-origin-tag obsidian" title="Obsidian">Obsidian</span>${due}<span class="aggregate-task-priority priority-${priority}">${priorityLabel}</span><button class="text-button" type="button" data-edit-task-properties="obsidian" data-task-file="${escapeHtml(task.relativePath)}" data-task-line="${task.line}" data-task-text="${escapeHtml(task.text)}">Edit</button><button class="task-open-link" type="button" data-open-native-task="obsidian" data-task-file="${escapeHtml(task.relativePath)}" aria-label="Open ${escapeHtml(task.displayText || task.text)} in Obsidian" title="Open in Obsidian">↗</button></div>`;
+        return `<div class="obsidian-task-row"><button class="select-today-button ${selected ? 'selected' : ''}" data-select-today data-select-source="obsidian" data-select-file="${escapeHtml(task.relativePath)}" data-select-text="${escapeHtml(task.text)}" aria-pressed="${selected}">${selected ? '✓ Today' : '+ Today'}</button>${weekTaskButton('obsidian', task)}<input type="checkbox" data-obsidian-file="${escapeHtml(task.relativePath)}" data-obsidian-line="${task.line}" data-obsidian-text="${escapeHtml(task.text)}" aria-label="Complete ${escapeHtml(task.text)}"><span class="obsidian-task-text">${escapeHtml(task.displayText || task.text)}</span><span class="task-origin-tag obsidian" title="Obsidian">Obsidian</span>${due}<span class="aggregate-task-priority priority-${priority}">${priorityLabel}</span><button class="text-button" type="button" data-edit-task-properties="obsidian" data-task-file="${escapeHtml(task.relativePath)}" data-task-line="${task.line}" data-task-text="${escapeHtml(task.text)}">Edit</button><button class="task-open-link" type="button" data-open-native-task="obsidian" data-task-file="${escapeHtml(task.relativePath)}" aria-label="Open ${escapeHtml(task.displayText || task.text)} in Obsidian" title="Open in Obsidian">↗</button></div>`;
       }).join('')}
     </section>`).join('');
 }
@@ -497,7 +585,7 @@ function renderReminders() {
         const selected = isSelectedForToday(workSelection('reminder', reminder));
         const priority = normalizedTaskPriority(reminder, 'reminder');
         const priorityLabel = ({ 1: 'Normal', 2: 'Medium', 3: 'High', 4: 'Urgent' })[priority] || 'Normal';
-        return `<div class="obsidian-task-row"><button class="select-today-button ${selected ? 'selected' : ''}" data-select-today data-select-source="reminder" data-select-id="${escapeHtml(reminder.id)}" aria-pressed="${selected}">${selected ? '✓ Today' : '+ Today'}</button><input type="checkbox" data-reminder="${escapeHtml(reminder.id)}" aria-label="Complete ${escapeHtml(reminder.title)}"><span class="obsidian-task-text">${escapeHtml(reminder.title)}</span><span class="task-origin-tag reminders" title="Apple Reminders">Apple Reminders</span>${reminder.dueDate ? `<time class="task-property-chip">${escapeHtml(reminder.dueDate.slice(0, 10))}</time>` : ''}<span class="aggregate-task-priority priority-${priority}">${priorityLabel}</span><button class="text-button" type="button" data-edit-task-properties="reminder" data-task-id="${escapeHtml(reminder.id)}">Edit</button><button class="task-open-link" type="button" data-open-native-task="reminder" data-task-id="${escapeHtml(reminder.id)}" aria-label="Open ${escapeHtml(reminder.title)} in Apple Reminders" title="Open in Apple Reminders">↗</button></div>`;
+        return `<div class="obsidian-task-row"><button class="select-today-button ${selected ? 'selected' : ''}" data-select-today data-select-source="reminder" data-select-id="${escapeHtml(reminder.id)}" aria-pressed="${selected}">${selected ? '✓ Today' : '+ Today'}</button>${weekTaskButton('reminder', reminder)}<input type="checkbox" data-reminder="${escapeHtml(reminder.id)}" aria-label="Complete ${escapeHtml(reminder.title)}"><span class="obsidian-task-text">${escapeHtml(reminder.title)}</span><span class="task-origin-tag reminders" title="Apple Reminders">Apple Reminders</span>${reminder.dueDate ? `<time class="task-property-chip">${escapeHtml(reminder.dueDate.slice(0, 10))}</time>` : ''}<span class="aggregate-task-priority priority-${priority}">${priorityLabel}</span><button class="text-button" type="button" data-edit-task-properties="reminder" data-task-id="${escapeHtml(reminder.id)}">Edit</button><button class="task-open-link" type="button" data-open-native-task="reminder" data-task-id="${escapeHtml(reminder.id)}" aria-label="Open ${escapeHtml(reminder.title)} in Apple Reminders" title="Open in Apple Reminders">↗</button></div>`;
       }).join('')}
     </section>`).join('');
 }
@@ -626,7 +714,7 @@ function renderUnifiedTasks() {
     const canEdit = ['todoist', 'reminder', 'obsidian'].includes(item.source);
     const edit = `data-edit-task-properties="${item.source}" data-task-id="${escapeHtml(item.id)}" data-task-file="${escapeHtml(item.task.relativePath || '')}" data-task-line="${item.task.line || ''}" data-task-text="${escapeHtml(item.task.text || '')}" data-task-title="${escapeHtml(item.title)}" data-task-due="${escapeHtml(item.dueDate)}" data-task-priority="${item.priority}"`;
     const nativeId = item.source === 'wrike' ? (item.task.permalink || '') : item.source === 'serviceNow' ? `${item.task.table}:${item.task.id}` : item.id;
-    return [item, `<article class="aggregate-task-row">${completion ? `<input type="checkbox" ${completion} aria-label="Complete ${escapeHtml(item.title)}">` : '<span class="task-readonly-mark" aria-hidden="true">•</span>'}<div class="aggregate-task-copy"><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(item.detail)}</small></div><span class="task-origin-tag ${sourceClass}">${sourceLabel}</span><span class="aggregate-task-date ${item.dueDate ? '' : 'no-date'}">${escapeHtml(dueText)}</span><span class="aggregate-task-priority priority-${item.priority}">${priorityLabel}</span>${canEdit ? `<button class="text-button aggregate-task-edit" type="button" ${edit}>Edit</button>` : ''}<button class="task-open-link" type="button" data-open-native-task="${item.source}" data-task-id="${escapeHtml(nativeId)}" aria-label="Open ${escapeHtml(item.title)} in ${sourceLabel}" title="Open in ${sourceLabel}">↗</button>${canEdit ? `<button class="select-today-button ${selected ? 'selected' : ''}" data-select-today data-select-source="${item.source}" ${item.source === 'obsidian' ? `data-select-file="${escapeHtml(item.task.relativePath)}" data-select-text="${escapeHtml(item.task.text)}"` : `data-select-id="${escapeHtml(item.id)}"`} aria-pressed="${selected}">${selected ? '✓ Today' : '+ Today'}</button>` : ''}</article>`];
+    return [item, `<article class="aggregate-task-row">${completion ? `<input type="checkbox" ${completion} aria-label="Complete ${escapeHtml(item.title)}">` : '<span class="task-readonly-mark" aria-hidden="true">•</span>'}<div class="aggregate-task-copy"><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(item.detail)}</small></div><span class="task-origin-tag ${sourceClass}">${sourceLabel}</span><span class="aggregate-task-date ${item.dueDate ? '' : 'no-date'}">${escapeHtml(dueText)}</span><span class="aggregate-task-priority priority-${item.priority}">${priorityLabel}</span>${canEdit ? `<button class="text-button aggregate-task-edit" type="button" ${edit}>Edit</button>` : ''}<button class="task-open-link" type="button" data-open-native-task="${item.source}" data-task-id="${escapeHtml(nativeId)}" aria-label="Open ${escapeHtml(item.title)} in ${sourceLabel}" title="Open in ${sourceLabel}">↗</button>${canEdit ? `<button class="select-today-button ${selected ? 'selected' : ''}" data-select-today data-select-source="${item.source}" ${item.source === 'obsidian' ? `data-select-file="${escapeHtml(item.task.relativePath)}" data-select-text="${escapeHtml(item.task.text)}"` : `data-select-id="${escapeHtml(item.id)}"`} aria-pressed="${selected}">${selected ? '✓ Today' : '+ Today'}</button>${weekTaskButton(item.source, item.task)}` : ''}</article>`];
   }));
   const projectGroups = new Map();
   for (const item of active) {
@@ -775,7 +863,43 @@ function updateJournalCount() {
 
 function renderJournalEntries() {
   const entries = state.day.journalEntries || [];
-  $('#journal-entries').innerHTML = entries.map((entry, index) => `<article class="journal-entry">${entry.timestamp ? `<time>${escapeHtml(formatJournalTime(entry.timestamp))}</time><span class="journal-entry-dash">-</span>` : ''}<span class="journal-entry-content">${escapeHtml(entry.text)}${entry.tags?.length ? ` ${entry.tags.map((tag) => `#${escapeHtml(tag)}`).join(' ')}` : ''}</span><button type="button" class="journal-task-button" data-journal-task="${index}" title="Convert to Obsidian task" aria-label="Convert journal entry to Obsidian task">↗</button></article>`).join('');
+  $('#journal-entries').innerHTML = entries.map((entry, index) => {
+    const context = (entry.context || []).map((item, contextIndex) => `<button type="button" class="journal-context-chip" data-journal-open-context="${index}" data-journal-context-index="${contextIndex}">${escapeHtml(item.label || 'Linked item')} ↗</button>`).join('');
+    const editForm = state.editingJournalIndex === index
+      ? `<textarea class="journal-entry-editor" data-journal-edit-value="${index}" aria-label="Edit journal entry">${escapeHtml(entry.text)}</textarea><div class="journal-entry-edit-actions"><button type="button" class="button secondary" data-journal-edit-cancel>Cancel</button><button type="button" class="button primary" data-journal-edit-save="${index}">Save</button></div>`
+      : `<span class="journal-entry-content">${escapeHtml(entry.text)}${entry.tags?.length ? ` ${entry.tags.map((tag) => `#${escapeHtml(tag)}`).join(' ')}` : ''}</span>`;
+    const controls = state.editingJournalIndex === index ? '' : `<span class="journal-entry-actions">${entry.timestamp ? `<button type="button" class="journal-entry-action" data-journal-edit="${index}" title="Edit entry" aria-label="Edit journal entry">✎</button><button type="button" class="journal-entry-action" data-journal-link="${index}" title="Link context" aria-label="Link context to journal entry">↗${entry.context?.length ? `<i>${entry.context.length}</i>` : ''}</button><button type="button" class="journal-task-button" data-journal-task="${index}" title="Convert to Obsidian task" aria-label="Convert journal entry to Obsidian task">↗</button><button type="button" class="journal-entry-action danger" data-journal-delete="${index}" title="Delete entry" aria-label="Delete journal entry">×</button>` : ''}</span>`;
+    return `<article class="journal-entry">${entry.timestamp ? `<time>${escapeHtml(formatJournalTime(entry.timestamp))}</time><span class="journal-entry-dash">-</span>` : ''}<div class="journal-entry-main">${editForm}${context ? `<div class="journal-entry-context">${context}</div>` : ''}</div>${controls}</article>`;
+  }).join('');
+}
+
+function journalContextCandidates() {
+  const candidates = [];
+  for (const item of state.meetingNotes || []) candidates.push({ key: `meeting:${item.relativePath}`, type: 'meeting', relativePath: item.relativePath, label: item.title, detail: `${item.meetingType || 'Meeting'} · ${item.date || 'Meeting note'}` });
+  for (const item of state.projects || []) candidates.push({ key: `project:${item.relativePath}`, type: 'project', relativePath: item.relativePath, label: item.title, detail: 'Project' });
+  for (const item of state.people || []) candidates.push({ key: `person:${item.relativePath}`, type: 'person', relativePath: item.relativePath, label: item.title, detail: [item.role, item.organization].filter(Boolean).join(' · ') || 'Person' });
+  const todoist = Object.values(state.tasksByQuadrant || {}).flat();
+  for (const item of new Map(todoist.map((task) => [String(task.id), task])).values()) candidates.push({ key: `todoist:${item.id}`, type: 'task', source: 'todoist', id: String(item.id), label: item.content || 'Todoist task', detail: `Todoist${item.projectName ? ` · ${item.projectName}` : ''}` });
+  for (const item of state.obsidianTasks || []) candidates.push({ key: `obsidian:${item.relativePath}:${item.line}`, type: 'task', source: 'obsidian', id: `${item.relativePath}:${item.line}`, relativePath: item.relativePath, line: item.line, label: item.displayText || item.text || 'Obsidian task', detail: `Obsidian · ${item.fileName || item.relativePath}` });
+  for (const item of state.reminders || []) candidates.push({ key: `reminder:${item.id}`, type: 'task', source: 'reminder', id: String(item.id), label: item.title || 'Reminder', detail: `Apple Reminders${item.list ? ` · ${item.list}` : ''}` });
+  return candidates.sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: 'base' }));
+}
+
+function renderJournalContextPicker() {
+  const query = ($('#journal-context-search').value || '').trim().toLocaleLowerCase();
+  const entry = state.day.journalEntries?.[state.linkingJournalIndex];
+  const selected = new Set((entry?.context || []).map((item) => item.key));
+  const visible = state.journalContextCandidates.filter((item) => `${item.label} ${item.detail}`.toLocaleLowerCase().includes(query));
+  $('#journal-context-list').innerHTML = visible.length ? visible.map((item) => `<label class="journal-context-option"><input type="checkbox" value="${escapeHtml(item.key)}" ${selected.has(item.key) ? 'checked' : ''}><span><strong>${escapeHtml(item.label)}</strong><small>${escapeHtml(item.detail)}</small></span></label>`).join('') : '<p class="journal-context-empty">No matching items.</p>';
+}
+
+function openJournalContextPicker(index) {
+  state.linkingJournalIndex = index;
+  state.journalContextCandidates = journalContextCandidates();
+  $('#journal-context-search').value = '';
+  renderJournalContextPicker();
+  $('#journal-context-modal').classList.remove('hidden');
+  $('#journal-context-search').focus();
 }
 
 function formatJournalTime(timestamp) {
@@ -801,14 +925,12 @@ function addJournalEntry() {
   const input = $('#journal-input');
   const text = input.value.trim();
   if (!text) return;
-  const tags = [...new Set($('#journal-tags').value.split(',').map((tag) => tag.trim().replace(/^#+/, '').replace(/\s+/g, '-').replace(/[^\p{L}\p{N}_/-]/gu, '')).filter(Boolean))];
   const timestamp = nextJournalTimestamp();
   state.day.journalEntries ||= [];
-  state.day.journalEntries.push({ timestamp, text, tags });
+  state.day.journalEntries.push({ timestamp, text, tags: [] });
   state.day.journal = text;
   state.day.journalTimestamp = timestamp;
   input.value = '';
-  $('#journal-tags').value = '';
   renderJournalEntries();
   updateJournalCount();
   scheduleSave();
@@ -846,6 +968,9 @@ async function openTodoistTaskComposer(content, description = '') {
 }
 
 function renderToday() {
+  state.editingJournalIndex = null;
+  state.linkingJournalIndex = null;
+  $('#journal-context-modal')?.classList.add('hidden');
   $('#date-input').value = state.date;
   $('#journal-date-input').value = state.date;
   $('#journal-date-subtitle').textContent = prettyDate(state.date, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
@@ -876,6 +1001,107 @@ function frequencyLabel(value) {
     return PROTOCOL_DAYS.filter((day) => selected.has(day.key)).map((day) => day.short).join(', ') || 'Choose days';
   }
   return ({ daily: 'Daily', weekdays: 'Weekdays', weekly: 'Weekly' })[normalized] || value;
+}
+
+function renderHabitTracker() {
+  const start = new Date(state.habitCalendarStart);
+  const dayCount = state.habitCalendarDays || 15;
+  const datesInView = Array.from({ length: dayCount }, (_value, index) => new Date(start.getFullYear(), start.getMonth(), start.getDate() + index));
+  const todayDate = new Date();
+  const today = localDateString(new Date());
+  const habits = state.habits || [];
+  const grid = $('#habit-heatmap');
+  const latestStart = new Date(todayDate.getFullYear(), todayDate.getMonth(), todayDate.getDate() - (dayCount - 1));
+  $('#habit-tracker-empty').classList.toggle('hidden', habits.length > 0);
+  grid.classList.toggle('hidden', habits.length === 0);
+  if (!habits.length) { grid.innerHTML = ''; return; }
+
+  const columns = `minmax(150px,1fr) 20px repeat(${dayCount},minmax(34px,1fr)) 20px repeat(3,42px)`;
+  grid.style.setProperty('--habit-columns', columns);
+  const monthHeader = `<div class="habit-heatmap-header" style="grid-template-columns:${columns}"><strong class="habit-name-heading">HABITS</strong><button class="habit-range-arrow" data-habit-range="previous" type="button" aria-label="Previous range">‹</button>${datesInView.map((date) => {
+    const dateString = localDateString(date);
+    return `<span class="habit-date-heading ${date.getDay() === 1 ? 'is-week-start' : ''} ${dateString === today ? 'is-today' : ''}" title="${escapeHtml(date.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' }))}"><small>${date.toLocaleDateString(undefined, { month: 'short' })}</small><b>${date.getDate()}</b><em>${date.toLocaleDateString(undefined, { weekday: 'short' })}</em></span>`;
+  }).join('')}<button class="habit-range-arrow" data-habit-range="next" type="button" aria-label="Next range" ${start >= latestStart ? 'disabled' : ''}>›</button><strong class="habit-stat-heading">Current<br>streak</strong><strong class="habit-stat-heading">Longest<br>streak</strong><strong class="habit-stat-heading">Total<br>count</strong></div>`;
+
+  const palette = ['green', 'green', 'green', 'green', 'green', 'green', 'blue', 'yellow', 'orange', 'yellow'];
+  const totals = Array.from({ length: dayCount }, (_value, index) => habits.reduce((count, habit) => count + ((habit.completed || []).includes(localDateString(datesInView[index])) ? 1 : 0), 0));
+  const rows = habits.map((habit, habitIndex) => {
+    const completed = new Set(habit.completed || []);
+    const dates = Array.from(completed).filter((date) => /^\d{4}-\d{2}-\d{2}$/.test(date)).sort();
+    const frequency = habit.frequency || 'daily';
+    const currentStreak = habitCurrentStreak(completed, today, frequency);
+    const longestStreak = habitLongestStreak(dates, frequency);
+    const cells = datesInView.map((day) => {
+      const date = localDateString(day);
+      const done = completed.has(date);
+      const future = date > today;
+      return `<button type="button" class="habit-heat-cell tone-${palette[habitIndex % palette.length]} ${done ? 'is-complete' : ''} ${date === today ? 'is-today' : ''}" data-habit-file="${escapeHtml(habit.relativePath)}" data-habit-date="${date}" aria-pressed="${done}" aria-label="${escapeHtml(habit.name)} · ${escapeHtml(date)} · ${done ? 'Done' : 'Not done'}" title="${escapeHtml(prettyDate(date, { weekday: 'long', month: 'long', day: 'numeric' }))} · ${done ? 'Done' : 'Not done'}" ${future ? 'disabled' : ''}></button>`;
+    }).join('');
+    return `<div class="habit-heatmap-row" style="grid-template-columns:${columns}"><span class="habit-row-name">${escapeHtml(habit.name)}</span><span></span>${cells}<span></span><span class="habit-stat-value ${currentStreak ? `tone-${palette[habitIndex % palette.length]}` : ''}">${currentStreak}</span><span class="habit-stat-value ${longestStreak > 0 && longestStreak === currentStreak ? `tone-${palette[habitIndex % palette.length]}` : ''}">${longestStreak}</span><span class="habit-stat-value plain">${dates.length}</span></div>`;
+  }).join('');
+  const footer = `<div class="habit-heatmap-footer" style="grid-template-columns:${columns}"><button class="habit-add-inline" type="button" data-create-habit>＋ New Habit</button><span></span>${totals.map((total) => `<span>${total || ''}</span>`).join('')}<span></span><div class="habit-range-control"><input id="habit-window-size" type="range" min="7" max="31" value="${dayCount}" aria-label="Adjust visible date range"></div></div>`;
+  grid.innerHTML = monthHeader + rows + footer;
+}
+
+function habitWeekStart(value) {
+  const date = new Date(`${value}T12:00:00`);
+  date.setDate(date.getDate() - ((date.getDay() + 6) % 7));
+  return localDateString(date);
+}
+
+function habitCurrentStreak(completed, today, frequency = 'daily') {
+  if (frequency === 'weekly') {
+    const weeks = new Set([...completed].map(habitWeekStart));
+    let week = habitWeekStart(today);
+    if (!weeks.has(week)) week = shiftDate(week, -7);
+    let count = 0;
+    while (weeks.has(week)) { count += 1; week = shiftDate(week, -7); }
+    return count;
+  }
+  const cursor = new Date(`${today}T12:00:00`);
+  const isWeekday = (date) => date.getDay() !== 0 && date.getDay() !== 6;
+  if (frequency === 'weekdays') while (!isWeekday(cursor)) cursor.setDate(cursor.getDate() - 1);
+  if (!completed.has(localDateString(cursor))) {
+    cursor.setDate(cursor.getDate() - 1);
+    if (frequency === 'weekdays') while (!isWeekday(cursor)) cursor.setDate(cursor.getDate() - 1);
+  }
+  let count = 0;
+  while (completed.has(localDateString(cursor))) {
+    count += 1;
+    cursor.setDate(cursor.getDate() - 1);
+    if (frequency === 'weekdays') while (!isWeekday(cursor)) cursor.setDate(cursor.getDate() - 1);
+  }
+  return count;
+}
+
+function habitLongestStreak(dates, frequency = 'daily') {
+  if (frequency === 'weekly') {
+    const weeks = [...new Set(dates.map(habitWeekStart))].sort();
+    let longestWeeks = 0;
+    let currentWeeks = 0;
+    let previousWeek = '';
+    for (const week of weeks) {
+      currentWeeks = previousWeek && shiftDate(previousWeek, 7) === week ? currentWeeks + 1 : 1;
+      longestWeeks = Math.max(longestWeeks, currentWeeks);
+      previousWeek = week;
+    }
+    return longestWeeks;
+  }
+  let longest = 0;
+  let current = 0;
+  let previous = '';
+  for (const date of dates) {
+    let nextExpected = previous ? shiftDate(previous, 1) : '';
+    if (frequency === 'weekdays' && nextExpected) {
+      const weekday = new Date(`${nextExpected}T12:00:00`).getDay();
+      if (weekday === 6) nextExpected = shiftDate(nextExpected, 2);
+      else if (weekday === 0) nextExpected = shiftDate(nextExpected, 1);
+    }
+    current = previous && nextExpected === date ? current + 1 : 1;
+    longest = Math.max(longest, current);
+    previous = date;
+  }
+  return longest;
 }
 
 const PROTOCOL_DAYS = [
@@ -1252,28 +1478,33 @@ function renderWorkoutDashboard() {
 
 function setActiveView(view) {
   const modules = state.config?.modules || {};
-  if ((view === 'habits' && modules.habits === false && modules.wellness === false) || (view === 'workouts' && modules.hevy === false)) view = 'today';
+  if (view === 'week' && !state.config?.vaultPath) view = 'today';
+  if ((view === 'habits' && modules.habits === false) || (view === 'protocols' && modules.wellness === false) || (view === 'workouts' && modules.hevy === false)) view = 'today';
   state.activeView = view;
   applyModuleVisibility();
-  const labels = { today: 'TODAY', journal: 'JOURNAL', meetings: 'MEETINGS', people: 'PEOPLE', projects: 'PROJECTS', work: 'TASKS', habits: state.config?.modules?.wellness === false ? 'HABITS' : 'PROTOCOLS', workouts: 'WORKOUTS' };
+  const labels = { today: 'TODAY', week: 'WEEK', journal: 'JOURNAL', meetings: 'MEETINGS', people: 'PEOPLE', projects: 'PROJECTS', work: 'TASKS', habits: 'HABITS', protocols: 'PROTOCOLS', workouts: 'WORKOUTS' };
   $('#workspace-crumb').textContent = labels[view] || 'DAYBOOK';
   $('#setup-view').classList.toggle('hidden', Boolean(state.config.vaultPath) || view !== 'today');
   $('#today-view').classList.toggle('hidden', !state.config.vaultPath || view !== 'today');
+  $('#week-view').classList.toggle('hidden', !state.config.vaultPath || view !== 'week');
   $('#journal-view').classList.toggle('hidden', view !== 'journal');
   $('#meetings-view').classList.toggle('hidden', view !== 'meetings');
   $('#people-view').classList.toggle('hidden', view !== 'people');
   $('#projects-view').classList.toggle('hidden', view !== 'projects');
   $('#work-view').classList.toggle('hidden', view !== 'work');
-  $('#habits-view').classList.toggle('hidden', view !== 'habits');
+  $('#habits-tracker-view').classList.toggle('hidden', view !== 'habits');
+  $('#habits-view').classList.toggle('hidden', view !== 'protocols');
   $('#workouts-view').classList.toggle('hidden', view !== 'workouts');
   $$('.nav-item').forEach((button) => button.classList.toggle('active', button.dataset.view === view));
   $('#open-note').title = view === 'journal' ? 'Open this journal day in Obsidian' : 'Open today’s note in Obsidian';
   $('#open-note').setAttribute('aria-label', $('#open-note').title);
   if (view === 'work') loadWork();
+  if (view === 'week') { state.weekStart = weekStartFor(state.date); state.weekData = []; loadWeek(true); }
   if (view === 'meetings') loadMeetingNotes();
   if (view === 'people') loadPeople();
   if (view === 'projects') loadProjects();
-  if (view === 'habits' && (modules.habits !== false || modules.wellness !== false)) refreshHabits().catch((error) => showToast(error.message, true));
+  if (view === 'habits') loadHabits().catch((error) => showToast(error.message, true));
+  if (view === 'protocols' && modules.wellness !== false) refreshHabits().catch((error) => showToast(error.message, true));
   if (view === 'workouts') {
     if (!state.hevyLoaded && modules.hevy !== false) {
       state.hevyLoading = true;
@@ -1447,13 +1678,13 @@ function applyModuleVisibility() {
   const todoistEnabled = modules.todoist !== false;
   const hevyEnabled = modules.hevy !== false;
   const habitsNav = $('.nav-item[data-view="habits"]');
+  const protocolsNav = $('.nav-item[data-view="protocols"]');
   const workoutsNav = $('.nav-item[data-view="workouts"]');
-  if (habitsNav) {
-    habitsNav.classList.toggle('hidden', !habitsEnabled && !wellnessEnabled);
-    habitsNav.querySelector('span:nth-child(2)').textContent = wellnessEnabled ? 'Protocols' : 'Habits';
-  }
+  if (habitsNav) habitsNav.classList.toggle('hidden', !habitsEnabled);
+  if (protocolsNav) protocolsNav.classList.toggle('hidden', !wellnessEnabled);
   if (workoutsNav) workoutsNav.classList.toggle('hidden', !hevyEnabled);
   $('#wellness-module-content').classList.toggle('hidden', !wellnessEnabled);
+  $('#habits-tracker-view').classList.toggle('hidden', !habitsEnabled || state.activeView !== 'habits');
   $('#build-protocol').classList.toggle('hidden', !wellnessEnabled);
   $('#protocol-page-title').textContent = wellnessEnabled ? 'Protocols' : 'Habits';
   $('#protocol-page-eyebrow').textContent = wellnessEnabled ? 'WELLNESS' : 'HABIT TRACKING';
@@ -1462,7 +1693,8 @@ function applyModuleVisibility() {
     : 'Track the habits you keep in your Obsidian vault.';
   $('#todoist-module').classList.toggle('hidden', !todoistEnabled);
   $('#connect-todoist').classList.toggle('hidden', !todoistEnabled);
-  if (!habitsEnabled && !wellnessEnabled && state.activeView === 'habits') setActiveView('today');
+  if (!habitsEnabled && state.activeView === 'habits') setActiveView('today');
+  if (!wellnessEnabled && state.activeView === 'protocols') setActiveView('today');
   if (!hevyEnabled && state.activeView === 'workouts') setActiveView('today');
 }
 
@@ -2071,6 +2303,146 @@ async function refreshCalendarEvents(date = state.date) {
   renderTodayPlan();
 }
 
+async function loadWeek(refreshTasks = false) {
+  const content = $('#week-content');
+  if (!content) return;
+  const requestId = ++state.weekLoadId;
+  const dates = weekDates();
+  const rangeEnd = dates[6];
+  $('#week-title').textContent = `Week ${isoWeekNumber(shiftDate(dates[0], 4))}`;
+  $('#week-range').textContent = `${prettyDate(dates[0], { month: 'long', day: 'numeric' })} – ${prettyDate(rangeEnd, { month: 'long', day: 'numeric', year: 'numeric' })}`;
+  state.weekLoading = true;
+  state.weekData = [];
+  renderWeek();
+  if (refreshTasks) await loadWork();
+  if (requestId !== state.weekLoadId) return;
+  const records = await Promise.all(dates.map(async (date) => {
+    const [note, calendar] = await Promise.all([
+      window.daybook.getDay(date).catch((error) => ({ error: error.message, day: {} })),
+      state.config?.calendarEnabled
+        ? window.daybook.listCalendarEvents(date).catch((error) => ({ error: error.message, events: [] }))
+        : Promise.resolve({ events: [] })
+    ]);
+    return { date, day: note.day || {}, noteError: note.error || '', events: calendar.events || [], calendarError: calendar.error || '', calendarAuthorized: calendar.authorized, supported: calendar.supported };
+  }));
+  if (requestId !== state.weekLoadId) return;
+  state.weekData = records;
+  state.weekLoading = false;
+  renderWeek();
+}
+
+function renderWeek() {
+  const content = $('#week-content');
+  if (!content) return;
+  if (state.weekLoading && !state.weekData.length) {
+    $('#week-summary').innerHTML = '<span class="week-summary-note">Loading your week…</span>';
+    content.innerHTML = '';
+    $('#week-unscheduled-count').textContent = '…';
+    $('#week-unscheduled-list').innerHTML = '<p class="week-unscheduled-empty">Loading open tasks…</p>';
+    return;
+  }
+  const today = localDateString(new Date());
+  const dates = weekDates();
+  const eventCount = state.weekData.reduce((total, entry) => total + entry.events.length, 0);
+  const taskCount = state.weekData.reduce((total, entry) => total + (entry.day.selectedWork || []).length, 0);
+  $('#week-summary').innerHTML = `<span><strong>${eventCount}</strong> calendar ${eventCount === 1 ? 'event' : 'events'}</span><span><strong>${taskCount}</strong> planned ${taskCount === 1 ? 'task' : 'tasks'}</span>${state.config?.calendarEnabled ? '' : '<span class="week-summary-note">Enable Calendar in Settings to see events.</span>'}`;
+  renderWeekUnscheduled();
+  content.innerHTML = dates.map((date) => {
+    const entry = state.weekData.find((item) => item.date === date) || { date, day: {}, events: [] };
+    const events = [...entry.events].sort((a, b) => {
+      if (Boolean(a.allDay) !== Boolean(b.allDay)) return a.allDay ? -1 : 1;
+      return new Date(a.start || 0) - new Date(b.start || 0);
+    });
+    const tasks = [...(entry.day.selectedWork || [])].sort((a, b) => {
+      const aTime = a.timeBlock?.start || '99:99'; const bTime = b.timeBlock?.start || '99:99';
+      return aTime.localeCompare(bTime);
+    });
+    const items = [
+      ...events.map((event) => ({ kind: 'event', event, sortTime: event.allDay ? -1 : new Date(event.start || 0).getTime() })),
+      ...tasks.map((task) => ({ kind: 'task', task, sortTime: task.timeBlock?.start ? timeStringToMinutes(task.timeBlock.start) * 60_000 : Number.MAX_SAFE_INTEGER }))
+    ].sort((a, b) => a.sortTime - b.sortTime).map((item) => {
+      if (item.kind === 'event') {
+        const event = item.event;
+        const time = event.allDay ? 'All day' : event.start ? formatWeekEventTime(event) : '';
+        return `<div class="week-item week-event"><span class="week-item-time">${escapeHtml(time)}</span><span class="week-item-copy"><strong>${escapeHtml(event.title || 'Untitled event')}</strong><small>${escapeHtml(event.calendar || 'Calendar')}</small></span><span class="week-item-mark" aria-hidden="true"></span></div>`;
+      }
+      const task = item.task;
+      const title = task.content || task.text || task.title || 'Untitled task';
+      return `<div class="week-item week-task"><span class="week-item-time">${task.timeBlock?.start ? escapeHtml(formatClock(task.timeBlock.start)) : 'Task'}</span><span class="week-item-copy"><strong>${escapeHtml(title)}</strong><small>${task.timeBlock ? 'Planned task' : 'Unscheduled for the day'}</small></span><span class="week-item-mark" aria-hidden="true"></span></div>`;
+    }).join('');
+    const status = entry.calendarError ? `<p class="week-day-empty">Calendar unavailable: ${escapeHtml(entry.calendarError)}</p>` : entry.calendarAuthorized === false ? '<p class="week-day-empty">Calendar access is off. Allow Daybook in macOS Privacy &amp; Security → Calendars.</p>' : entry.noteError ? `<p class="week-day-empty">Could not load this day: ${escapeHtml(entry.noteError)}</p>` : '';
+    return `<article class="week-day-row ${date === today ? 'is-today' : ''}"><div class="week-day-date"><span class="week-day-name">${escapeHtml(prettyDate(date, { weekday: 'long' }))}${date === today ? '<i>Today</i>' : ''}</span><span class="week-day-full-date">${escapeHtml(prettyDate(date, { month: 'long', day: 'numeric' }))}</span><button class="week-open-day" type="button" data-week-open="${date}">Open day <span aria-hidden="true">→</span></button></div><div class="week-day-agenda">${status}${items || (!status ? '<p class="week-day-empty">Nothing planned yet.</p>' : '')}</div><div class="week-day-count"><span>${events.length} ${events.length === 1 ? 'event' : 'events'}</span><span>${tasks.length} ${tasks.length === 1 ? 'task' : 'tasks'}</span></div></article>`;
+  }).join('');
+}
+
+function renderWeekUnscheduled() {
+  const planned = new Set(state.weekData.flatMap((entry) => (entry.day.selectedWork || []).map(workSelectionKey)));
+  const todoistTasks = [...new Map(Object.values(state.tasksByQuadrant).flat().filter((task) => !task.checked).map((task) => [String(task.id), task])).values()];
+  const linkedProjects = new Map();
+  for (const project of state.projects || []) {
+    for (const link of project.taskLinks || []) {
+      const key = projectTaskKey(link);
+      if (!linkedProjects.has(key)) linkedProjects.set(key, project.title);
+    }
+  }
+  const candidates = [
+    ...todoistTasks.map((task) => ({ source: 'todoist', task, title: task.content, detail: task.projectName || 'Todoist', projectName: linkedProjects.get(projectTaskKey({ source: 'todoist', id: String(task.id) })) || task.projectName || 'No project' })),
+    ...state.obsidianTasks.filter((task) => !task.checked).map((task) => ({ source: 'obsidian', task, title: task.displayText || task.text, detail: task.fileName || 'Obsidian', projectName: linkedProjects.get(projectTaskKey({ source: 'obsidian', relativePath: task.relativePath, text: task.text })) || 'No project' })),
+    ...state.reminders.map((task) => ({ source: 'reminder', task, title: task.title, detail: task.list || 'Apple Reminders', projectName: linkedProjects.get(projectTaskKey({ source: 'reminder', id: String(task.id) })) || task.list || 'No project' }))
+  ].filter((item) => !planned.has(workSelectionKey(workSelection(item.source, item.task))))
+    .sort((a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: 'base' }));
+  const sourceCounts = { all: candidates.length, todoist: 0, reminder: 0, obsidian: 0 };
+  candidates.forEach((item) => { sourceCounts[item.source] += 1; });
+  for (const [source, count] of Object.entries(sourceCounts)) {
+    const countNode = $(`[data-week-source-count="${source}"]`);
+    if (countNode) countNode.textContent = String(count);
+  }
+  $$('#week-unscheduled-filters [data-week-source-filter]').forEach((button) => {
+    const active = button.dataset.weekSourceFilter === state.weekTaskSourceFilter;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-selected', String(active));
+  });
+  const sourceFiltered = state.weekTaskSourceFilter === 'all' ? candidates : candidates.filter((item) => item.source === state.weekTaskSourceFilter);
+  const query = state.weekTaskSearch.trim().toLocaleLowerCase();
+  const filtered = query
+    ? sourceFiltered.filter((item) => [item.title, item.detail, item.projectName, item.source].some((value) => String(value || '').toLocaleLowerCase().includes(query)))
+    : sourceFiltered;
+  $('#week-unscheduled-count').textContent = String(filtered.length);
+  const pageSize = 8;
+  const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
+  state.weekTaskPage = Math.min(state.weekTaskPage, pageCount - 1);
+  const pageItems = filtered.slice(state.weekTaskPage * pageSize, (state.weekTaskPage + 1) * pageSize);
+  const pagination = $('#week-unscheduled-pagination');
+  if (pagination) {
+    pagination.innerHTML = filtered.length > pageSize
+      ? `<button type="button" data-week-task-page="prev" ${state.weekTaskPage === 0 ? 'disabled' : ''}>Previous</button><span>Page ${state.weekTaskPage + 1} of ${pageCount}</span><button type="button" data-week-task-page="next" ${state.weekTaskPage >= pageCount - 1 ? 'disabled' : ''}>Next</button>`
+      : '';
+    pagination.classList.toggle('hidden', filtered.length <= pageSize);
+  }
+  const projectGroups = new Map();
+  pageItems.forEach((item) => {
+    const name = item.projectName || 'No project';
+    if (!projectGroups.has(name)) projectGroups.set(name, []);
+    projectGroups.get(name).push(item);
+  });
+  $('#week-unscheduled-list').innerHTML = filtered.length ? [...projectGroups.entries()].sort(([a], [b]) => a.localeCompare(b, undefined, { sensitivity: 'base' })).map(([projectName, items]) => {
+    const collapsed = state.collapsedWeekProjects.has(projectName);
+    return `<details class="week-unscheduled-project-group" data-week-project="${escapeHtml(projectName)}" ${collapsed ? '' : 'open'}><summary><strong>${escapeHtml(projectName)}</strong><span>${items.length}</span></summary><div class="week-unscheduled-project-tasks">${items.map((item) => {
+    const sourceLabel = item.source === 'reminder' ? 'Apple Reminders' : item.source === 'todoist' ? 'Todoist' : 'Obsidian';
+    const sourceClass = item.source === 'reminder' ? 'reminders' : item.source;
+    return `<article class="week-unscheduled-task"><div class="week-unscheduled-task-copy"><strong title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</strong><small><span class="task-origin-tag ${sourceClass}">${sourceLabel}</span>${escapeHtml(item.detail)}</small></div>${weekTaskButton(item.source, item.task)}</article>`;
+    }).join('')}</div></details>`;
+  }).join('') : `<p class="week-unscheduled-empty">${query ? 'No unscheduled tasks match your search.' : sourceFiltered.length ? 'No tasks from this source are unscheduled this week.' : candidates.length ? 'No tasks from this source are unscheduled this week.' : 'All available tasks are planned for this week.'}</p>`;
+}
+
+function formatWeekEventTime(event) {
+  const start = new Date(event.start);
+  if (Number.isNaN(start.getTime())) return '';
+  if (!event.end || Number.isNaN(new Date(event.end).getTime())) return start.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const end = new Date(event.end);
+  return `${start.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}–${end.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
+}
+
 async function requestCalendarAccess() {
   if (!state.calendarSupported) return;
   try {
@@ -2104,11 +2476,20 @@ async function refreshHabits() {
   state.committedProtocolTime = committedProtocol.time || '';
   state.committedProtocolTimings = committedProtocol.itemTimings || {};
   state.committedProtocolFrequencies = committedProtocol.itemFrequencies || {};
+  $('#nav-habits-count').textContent = String(state.habits.length);
+  $('#nav-protocol-count').textContent = String(state.committedProtocolPaths.length);
+  renderHabitTracker();
   renderProtocolBundles();
   renderProtocolCycles();
-  $('#nav-habit-count').textContent = String(state.config?.modules?.wellness !== false ? state.committedProtocolPaths.length : state.habits.length);
   renderProtocolCalendar();
   renderTodayPlan();
+}
+
+async function loadHabits() {
+  if (state.config?.modules?.habits === false) { state.habits = []; }
+  else state.habits = await window.daybook.listHabits();
+  $('#nav-habits-count').textContent = String(state.habits.length);
+  renderHabitTracker();
 }
 
 async function refreshHevyWorkouts() {
@@ -2301,6 +2682,98 @@ async function init() {
   }
 
   $$('.nav-item, .panel-link').forEach((button) => button.addEventListener('click', () => setActiveView(button.dataset.view)));
+  $('#week-prev').addEventListener('click', () => { state.weekStart = shiftDate(state.weekStart, -7); state.weekData = []; loadWeek(); });
+  $('#week-next').addEventListener('click', () => { state.weekStart = shiftDate(state.weekStart, 7); state.weekData = []; loadWeek(); });
+  $('#week-current').addEventListener('click', () => { state.weekStart = weekStartFor(localDateString(new Date())); state.weekData = []; loadWeek(); });
+  const openHabitCreate = () => {
+    $('#habit-create-form').reset();
+    $('#habit-create-status').textContent = '';
+    $('#habit-create-modal').classList.remove('hidden');
+    $('#habit-create-name').focus();
+  };
+  $('#habit-tracker-empty').addEventListener('click', (event) => { if (event.target.closest('[data-create-habit]')) openHabitCreate(); });
+  $('#habit-heatmap').addEventListener('click', async (event) => {
+    if (event.target.closest('[data-create-habit]')) { openHabitCreate(); return; }
+    const rangeButton = event.target.closest('[data-habit-range]');
+    if (rangeButton && !rangeButton.disabled) {
+      state.habitCalendarStart.setDate(state.habitCalendarStart.getDate() + (rangeButton.dataset.habitRange === 'previous' ? -state.habitCalendarDays : state.habitCalendarDays));
+      renderHabitTracker();
+      return;
+    }
+    const cell = event.target.closest('[data-habit-file]');
+    if (!cell || cell.disabled) return;
+    cell.disabled = true;
+    const habit = state.habits.find((item) => item.relativePath === cell.dataset.habitFile);
+    if (!habit) return;
+    try {
+      const result = await window.daybook.toggleHabit(habit.relativePath, cell.dataset.habitDate);
+      habit.completed = result.completed;
+      renderHabitTracker();
+    } catch (error) {
+      showToast(error.message, true);
+      cell.disabled = false;
+    }
+  });
+  $('#habit-heatmap').addEventListener('change', (event) => {
+    if (event.target.id !== 'habit-window-size') return;
+    const oldEnd = new Date(state.habitCalendarStart.getFullYear(), state.habitCalendarStart.getMonth(), state.habitCalendarStart.getDate() + state.habitCalendarDays - 1);
+    state.habitCalendarDays = Number(event.target.value);
+    state.habitCalendarStart = new Date(oldEnd.getFullYear(), oldEnd.getMonth(), oldEnd.getDate() - state.habitCalendarDays + 1);
+    renderHabitTracker();
+  });
+  $('#habit-create-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const save = event.currentTarget.querySelector('[type="submit"]');
+    save.disabled = true;
+    $('#habit-create-status').textContent = 'Creating…';
+    try {
+      const result = await window.daybook.createHabit($('#habit-create-name').value.trim(), $('#habit-create-frequency').value);
+      $('#habit-create-modal').classList.add('hidden');
+      await loadHabits();
+      showToast(`${result.name} added to Habits.`);
+    } catch (error) {
+      $('#habit-create-status').textContent = error.message;
+    } finally { save.disabled = false; }
+  });
+  $('#week-content').addEventListener('click', async (event) => {
+    const button = event.target.closest('[data-week-open]');
+    if (!button) return;
+    setActiveView('today');
+    await loadDate(button.dataset.weekOpen);
+  });
+  $('#week-task-dates').addEventListener('click', (event) => {
+    const button = event.target.closest('[data-week-task-date]');
+    if (button && !button.disabled) addTaskToWeekDate(button.dataset.weekTaskDate);
+  });
+  $('#week-unscheduled-list').addEventListener('click', (event) => {
+    const button = event.target.closest('[data-select-week]');
+    if (button) openWeekTaskFromButton(button);
+  });
+  $('#week-unscheduled-pagination').addEventListener('click', (event) => {
+    const button = event.target.closest('[data-week-task-page]');
+    if (!button || button.disabled) return;
+    state.weekTaskPage += button.dataset.weekTaskPage === 'next' ? 1 : -1;
+    renderWeekUnscheduled();
+  });
+  $('#week-unscheduled-filters').addEventListener('click', (event) => {
+    const button = event.target.closest('[data-week-source-filter]');
+    if (!button) return;
+    state.weekTaskSourceFilter = button.dataset.weekSourceFilter;
+    state.weekTaskPage = 0;
+    renderWeekUnscheduled();
+  });
+  $('#week-unscheduled-search').addEventListener('input', (event) => {
+    state.weekTaskSearch = event.target.value;
+    state.weekTaskPage = 0;
+    renderWeekUnscheduled();
+  });
+  $('#week-unscheduled-list').addEventListener('toggle', (event) => {
+    const group = event.target;
+    if (!(group instanceof HTMLDetailsElement) || !group.matches('[data-week-project]')) return;
+    const projectName = group.dataset.weekProject;
+    if (group.open) state.collapsedWeekProjects.delete(projectName);
+    else state.collapsedWeekProjects.add(projectName);
+  }, true);
   $('#projects-empty').addEventListener('click', (event) => { if (event.target.closest('[data-create-project]')) openProjectEditor(); });
   $('#project-status-tabs').addEventListener('click', (event) => {
     const button = event.target.closest('[data-project-filter]');
@@ -2822,6 +3295,60 @@ async function init() {
   $('#journal-input').addEventListener('input', updateJournalCount);
   $('#journal-add').addEventListener('click', addJournalEntry);
   $('#journal-entries').addEventListener('click', async (event) => {
+    const edit = event.target.closest('[data-journal-edit]');
+    if (edit) {
+      state.editingJournalIndex = Number(edit.dataset.journalEdit);
+      renderJournalEntries();
+      $('#journal-entries [data-journal-edit-value]')?.focus();
+      return;
+    }
+    if (event.target.closest('[data-journal-edit-cancel]')) {
+      state.editingJournalIndex = null;
+      renderJournalEntries();
+      return;
+    }
+    const saveEdit = event.target.closest('[data-journal-edit-save]');
+    if (saveEdit) {
+      const index = Number(saveEdit.dataset.journalEditSave);
+      const text = $('#journal-entries [data-journal-edit-value]')?.value.trim();
+      const entry = state.day.journalEntries?.[index];
+      if (!entry || !text) return;
+      entry.text = text;
+      state.editingJournalIndex = null;
+      renderJournalEntries();
+      scheduleSave();
+      showToast('Journal entry updated.');
+      return;
+    }
+    const remove = event.target.closest('[data-journal-delete]');
+    if (remove) {
+      const index = Number(remove.dataset.journalDelete);
+      const entry = state.day.journalEntries?.[index];
+      if (!entry || !window.confirm('Delete this journal entry?')) return;
+      state.day.journalEntries.splice(index, 1);
+      state.day.journal = state.day.journalEntries.at(-1)?.text || '';
+      state.editingJournalIndex = null;
+      renderJournalEntries();
+      scheduleSave();
+      showToast('Journal entry deleted.');
+      return;
+    }
+    const link = event.target.closest('[data-journal-link]');
+    if (link) {
+      openJournalContextPicker(Number(link.dataset.journalLink));
+      return;
+    }
+    const openContext = event.target.closest('[data-journal-open-context]');
+    if (openContext) {
+      const entry = state.day.journalEntries?.[Number(openContext.dataset.journalOpenContext)];
+      const item = entry?.context?.[Number(openContext.dataset.journalContextIndex)];
+      if (!item) return;
+      try {
+        if (item.relativePath) await window.daybook.openNote(item.relativePath);
+        else if (item.source && item.id) await window.daybook.openNativeTask(item.source, item.id);
+      } catch (error) { showToast(error.message, true); }
+      return;
+    }
     const button = event.target.closest('[data-journal-task]');
     if (!button) return;
     const entry = state.day.journalEntries?.[Number(button.dataset.journalTask)];
@@ -2838,6 +3365,18 @@ async function init() {
       button.disabled = false;
       showToast(error.message, true);
     }
+  });
+  $('#journal-context-search').addEventListener('input', renderJournalContextPicker);
+  $('#journal-context-save').addEventListener('click', () => {
+    const entry = state.day.journalEntries?.[state.linkingJournalIndex];
+    if (!entry) return;
+    const selected = new Set($$('#journal-context-list input:checked').map((input) => input.value));
+    entry.context = state.journalContextCandidates.filter((item) => selected.has(item.key));
+    $('#journal-context-modal').classList.add('hidden');
+    state.linkingJournalIndex = null;
+    renderJournalEntries();
+    scheduleSave();
+    showToast('Journal context saved.');
   });
   $('#protocol-library-list').addEventListener('change', async (event) => {
     const input = event.target.closest('[data-cycle-item], [data-cycle-timing], [data-cycle-frequency], [data-cycle-weekday]');
@@ -2937,6 +3476,11 @@ async function init() {
     const removeTodayButton = event.target.closest('#due-today-list [data-remove-selected]');
     if (removeTodayButton) {
       removeSelectedWorkAt(Number(removeTodayButton.dataset.removeSelected));
+      return;
+    }
+    const weekButton = event.target.closest('[data-select-week]');
+    if (weekButton) {
+      openWeekTaskFromButton(weekButton);
       return;
     }
     const openButton = event.target.closest('[data-open-native-task]');
