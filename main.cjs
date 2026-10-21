@@ -7,6 +7,7 @@ const crypto = require('node:crypto');
 const { pathToFileURL } = require('node:url');
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
+const http = require('node:http');
 const execFileAsync = promisify(execFile);
 
 const START = '<!-- daybook:start -->';
@@ -62,22 +63,236 @@ function userConfigPath() {
 }
 
 function daybookDataFolder(vaultPath) {
-  return path.join(vaultPath, 'Daybook');
+  return path.join(vaultPath, 'SYSTEM', 'DAYBOOK');
 }
 
 async function migrateLegacyDaybookData(vaultPath) {
   if (!vaultPath) return;
-  const legacyFolder = path.join(vaultPath, '.daybook');
   const currentFolder = daybookDataFolder(vaultPath);
-  for (const name of ['protocol-bundles.json', 'protocol-cycles.json', 'settings.json', 'hevy-workouts-cache.json']) {
-    const source = path.join(legacyFolder, name);
+  await fs.mkdir(currentFolder, { recursive: true });
+  const legacyFolders = [
+    path.join(vaultPath, 'Daybook'),
+    path.join(vaultPath, '.daybook')
+  ];
+  for (const name of ['protocol-bundles.json', 'protocol-cycles.json', 'settings.json', 'hevy-workouts-cache.json', 'weight-readings.json']) {
     const destination = path.join(currentFolder, name);
-    try {
-      await fs.copyFile(source, destination, fsConstants.COPYFILE_EXCL);
-    } catch (error) {
-      if (error.code !== 'EEXIST' && error.code !== 'ENOENT') throw error;
+    for (const legacyFolder of legacyFolders) {
+      try {
+        await fs.copyFile(path.join(legacyFolder, name), destination, fsConstants.COPYFILE_EXCL);
+        break;
+      } catch (error) {
+        if (error.code === 'EEXIST') break;
+        if (error.code !== 'ENOENT') throw error;
+      }
     }
   }
+}
+
+function weightReadingsPath(vaultPath) {
+  return path.join(daybookDataFolder(vaultPath), 'weight-readings.json');
+}
+
+function parseCsvRows(text) {
+  const rows = [];
+  let row = [], cell = '', quoted = false;
+  const source = String(text || '').replace(/^\uFEFF/, '');
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+    if (quoted && char === '"' && source[index + 1] === '"') { cell += '"'; index += 1; }
+    else if (char === '"') quoted = !quoted;
+    else if (char === ',' && !quoted) { row.push(cell.trim()); cell = ''; }
+    else if ((char === '\n' || char === '\r') && !quoted) {
+      row.push(cell.trim()); cell = '';
+      if (row.some((value) => value)) rows.push(row);
+      row = [];
+      if (char === '\r' && source[index + 1] === '\n') index += 1;
+    } else cell += char;
+  }
+  row.push(cell.trim());
+  if (row.some((value) => value)) rows.push(row);
+  return rows;
+}
+
+function parseGarminWeightCsv(text) {
+  const rows = parseCsvRows(text);
+  const headerIndex = rows.findIndex((row) => row.some((value) => /^(date|time)$/i.test(value.trim())) && row.some((value) => /^weight(?:\s*\([^)]*\))?$/i.test(value.trim())));
+  if (headerIndex < 0) throw new Error('Could not find a Garmin weight CSV header. Choose the weight report exported from Garmin Connect.');
+  const headers = rows[headerIndex].map((value) => value.trim().toLowerCase());
+  const indexOf = (pattern) => headers.findIndex((header) => pattern.test(header));
+  const dateColumn = indexOf(/^date$/);
+  const timeColumn = indexOf(/^time$/);
+  const weightColumn = indexOf(/^weight/);
+  const fatColumn = indexOf(/^(body\s*fat|fat)(\s*\(%\))?$/);
+  const bmiColumn = indexOf(/^bmi$/);
+  let activeDate = '';
+  const measurements = [];
+  const parseDate = (value) => {
+    const clean = String(value || '').replace(/^\uFEFF/, '').trim();
+    if (!clean) return '';
+    const iso = clean.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+    const date = iso ? new Date(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3]), 12) : new Date(clean);
+    return Number.isNaN(date.getTime()) ? '' : `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+  };
+  const parseNumber = (value) => {
+    const normalized = String(value || '').trim().replace(/,/g, '.').replace(/[^\d.+-]/g, '');
+    const number = Number(normalized);
+    return Number.isFinite(number) && number > 0 ? number : null;
+  };
+  for (const row of rows.slice(headerIndex + 1)) {
+    if (dateColumn >= 0 && row[dateColumn]) activeDate = parseDate(row[dateColumn]) || activeDate;
+    else if (row[0] && !parseNumber(row[weightColumn])) activeDate = parseDate(row[0]) || activeDate;
+    const rawWeight = row[weightColumn];
+    const numericWeight = parseNumber(rawWeight);
+    const date = dateColumn >= 0 ? (parseDate(row[dateColumn]) || activeDate) : activeDate;
+    if (!date || !numericWeight) continue;
+    const rawText = String(rawWeight || '').toLowerCase();
+    const weightKg = /\b(lb|lbs|pound|pounds)\b/.test(rawText) || /\blb\b/.test(headers[weightColumn] || '') ? numericWeight / 2.2046226218 : numericWeight;
+    const time = timeColumn >= 0 ? String(row[timeColumn] || '').trim() : '';
+    const timestamp = time ? new Date(`${date} ${time}`) : new Date(`${date}T12:00:00`);
+    measurements.push({
+      date, timestamp: Number.isNaN(timestamp.getTime()) ? `${date}T12:00:00` : timestamp.toISOString(),
+      weightKg: Math.round(weightKg * 1000) / 1000,
+      bodyFatPercent: fatColumn >= 0 ? parseNumber(row[fatColumn]) : null,
+      bmi: bmiColumn >= 0 ? parseNumber(row[bmiColumn]) : null,
+      source: 'Garmin Connect'
+    });
+  }
+  if (!measurements.length) throw new Error('No weight readings were found in that CSV. Check that it is a Garmin Connect weight report.');
+  return measurements;
+}
+
+async function handleListWeightReadings() {
+  const config = await readConfig();
+  ensureConfigured(config);
+  try {
+    const data = JSON.parse(await fs.readFile(weightReadingsPath(config.vaultPath), 'utf8'));
+    return Array.isArray(data.readings) ? data.readings : [];
+  } catch (error) { if (error.code === 'ENOENT') return []; throw error; }
+}
+
+async function handleImportGarminWeightCsv() {
+  const config = await readConfig();
+  ensureConfigured(config);
+  const result = await dialog.showOpenDialog(mainWindow, { title: 'Import Garmin Connect weight report', properties: ['openFile'], filters: [{ name: 'CSV files', extensions: ['csv'] }] });
+  if (result.canceled || !result.filePaths[0]) return { canceled: true, imported: 0, readings: await handleListWeightReadings() };
+  const file = result.filePaths[0];
+  const stat = await fs.stat(file);
+  if (stat.size > 10 * 1024 * 1024) throw new Error('That CSV is larger than 10 MB. Export a shorter date range and try again.');
+  const imported = parseGarminWeightCsv(await fs.readFile(file, 'utf8'));
+  const previous = await handleListWeightReadings();
+  const merged = new Map(previous.map((entry) => [`${entry.timestamp}|${entry.weightKg}`, entry]));
+  for (const entry of imported) merged.set(`${entry.timestamp}|${entry.weightKg}`, entry);
+  const readings = [...merged.values()].sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+  const destination = weightReadingsPath(config.vaultPath);
+  await fs.mkdir(path.dirname(destination), { recursive: true });
+  const temporary = `${destination}.${process.pid}.tmp`;
+  await fs.writeFile(temporary, JSON.stringify({ version: 1, updatedAt: new Date().toISOString(), readings }, null, 2), 'utf8');
+  await fs.rename(temporary, destination);
+  return { canceled: false, imported: imported.length, readings };
+}
+
+function dexaScansFolder(config) {
+  return path.join(configuredFolderPath(config, 'wellnessFolder', 'Wellness'), 'DEXA Scans');
+}
+
+async function handleChooseDexaReport(date) {
+  ensureDate(date);
+  const config = await readConfig();
+  ensureConfigured(config);
+  const result = await dialog.showOpenDialog(mainWindow, { title: 'Attach DEXA report', properties: ['openFile'], filters: [{ name: 'DEXA report', extensions: ['pdf', 'png', 'jpg', 'jpeg', 'heic', 'tif', 'tiff'] }] });
+  if (result.canceled || !result.filePaths[0]) return { canceled: true };
+  const source = result.filePaths[0];
+  const stats = await fs.stat(source);
+  if (stats.size > 30 * 1024 * 1024) throw new Error('The DEXA report is larger than 30 MB. Choose a smaller PDF or image.');
+  const extension = path.extname(source).toLowerCase();
+  const attachmentFolder = normalizeVaultFolder(config.attachmentsFolder, 'Attachments');
+  const baseName = `DEXA-${date}`;
+  let filename = `${baseName}${extension}`;
+  let index = 2;
+  while (true) {
+    try { await fs.access(path.join(config.vaultPath, ...attachmentFolder.split('/'), filename)); filename = `${baseName}-${index++}${extension}`; }
+    catch { break; }
+  }
+  const relativePath = safeRelative(attachmentFolder, filename).split(path.sep).join('/');
+  const destination = path.join(config.vaultPath, relativePath);
+  await fs.mkdir(path.dirname(destination), { recursive: true });
+  await fs.copyFile(source, destination);
+  return { canceled: false, relativePath, filename };
+}
+
+function dexaNumber(value, label, allowZero = false) {
+  if (value === '' || value === null || value === undefined) return null;
+  const number = Number(value);
+  if (!Number.isFinite(number) || (allowZero ? number < 0 : number <= 0)) throw new Error(`${label} must be a ${allowZero ? 'non-negative' : 'positive'} number.`);
+  return Math.round(number * 1000) / 1000;
+}
+
+async function handleSaveDexaScan(input = {}) {
+  const config = await readConfig();
+  ensureConfigured(config);
+  const date = String(input.date || '');
+  ensureDate(date);
+  const fields = {
+    body_fat_percent: dexaNumber(input.bodyFatPercent, 'Body fat percentage', true),
+    fat_mass_lb: dexaNumber(input.fatMassLb, 'Fat mass'),
+    lean_mass_lb: dexaNumber(input.leanMassLb, 'Lean mass'),
+    bone_mineral_content_lb: dexaNumber(input.boneMineralContentLb, 'Bone mineral content'),
+    visceral_fat_g: dexaNumber(input.visceralFatG, 'Visceral fat', true),
+    android_gynoid_ratio: dexaNumber(input.androidGynoidRatio, 'Android/gynoid ratio'),
+    bone_mineral_density_g_cm2: dexaNumber(input.boneMineralDensity, 'Bone mineral density')
+  };
+  const report = typeof input.reportPath === 'string' ? input.reportPath.trim() : '';
+  if (report) {
+    if (path.isAbsolute(report) || /^[A-Za-z]:/.test(report)) throw new Error('The attached report must be stored inside the selected vault.');
+    const relativeReport = safeRelative('', report);
+    const vaultRoot = path.resolve(config.vaultPath);
+    const reportPath = path.resolve(vaultRoot, relativeReport);
+    if (!reportPath.startsWith(`${vaultRoot}${path.sep}`)) throw new Error('The attached report must be stored inside the selected vault.');
+    const attachmentRoot = path.resolve(vaultRoot, ...normalizeVaultFolder(config.attachmentsFolder, 'Attachments').split('/'));
+    if (!reportPath.startsWith(`${attachmentRoot}${path.sep}`)) throw new Error('Choose the report with the attachment button so it is saved in the configured attachments folder.');
+    const reportStats = await fs.stat(reportPath).catch(() => null);
+    if (!reportStats?.isFile()) throw new Error('The attached report could not be found in the vault. Attach it again and retry.');
+  }
+  const noteFolder = dexaScansFolder(config);
+  await fs.mkdir(noteFolder, { recursive: true });
+  const baseName = `DEXA-${date}`;
+  let filename = `${baseName}.md`, suffix = 2;
+  while (true) {
+    try { await fs.access(path.join(noteFolder, filename)); filename = `${baseName}-${suffix++}.md`; }
+    catch { break; }
+  }
+  const title = `DEXA Scan ${date}`;
+  const propertyLines = [
+    '---', 'type: dexa-scan', `scan_date: ${date}`,
+    ...Object.entries(fields).filter(([, value]) => value !== null).map(([key, value]) => `${key}: ${value}`),
+    ...(report ? [`report: ${yamlScalar(report)}`] : []), '---'
+  ];
+  const noteBody = `${propertyLines.join('\n')}\n\n# ${title}\n\n${String(input.notes || '').trim()}${report ? `${input.notes ? '\n\n' : ''}## Report\n\n[[${report}]]` : ''}\n`;
+  const relativePath = path.relative(config.vaultPath, path.join(noteFolder, filename)).split(path.sep).join('/');
+  await fs.writeFile(path.join(noteFolder, filename), noteBody, 'utf8');
+  return { relativePath, title, date, ...fields, reportPath: report };
+}
+
+async function handleListDexaScans() {
+  const config = await readConfig();
+  ensureConfigured(config);
+  const folder = dexaScansFolder(config);
+  let entries;
+  try { entries = await fs.readdir(folder, { withFileTypes: true }); }
+  catch (error) { if (error.code === 'ENOENT') return []; throw error; }
+  const scans = [];
+  for (const entry of entries.filter((item) => item.isFile() && item.name.toLowerCase().endsWith('.md'))) {
+    const fullPath = path.join(folder, entry.name);
+    const content = await fs.readFile(fullPath, 'utf8');
+    const match = content.match(/^---\s*\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
+    const frontmatter = match?.[1] || '';
+    if (frontmatterValue(frontmatter, ['type']) !== 'dexa-scan') continue;
+    const value = (key) => frontmatterValue(frontmatter, [key]);
+    const number = (key) => { const parsed = Number(value(key)); return value(key) && Number.isFinite(parsed) ? parsed : null; };
+    const notes = content.slice(match?.[0].length || 0).replace(/^\s*#.*(?:\r?\n)?/, '').replace(/\r?\n## Report[\s\S]*$/, '').trim();
+    scans.push({ title: path.basename(entry.name, '.md').replace(/-/g, ' '), date: value('scan_date'), relativePath: path.relative(config.vaultPath, fullPath).split(path.sep).join('/'), bodyFatPercent: number('body_fat_percent'), fatMassLb: number('fat_mass_lb'), leanMassLb: number('lean_mass_lb'), boneMineralContentLb: number('bone_mineral_content_lb'), visceralFatG: number('visceral_fat_g'), androidGynoidRatio: number('android_gynoid_ratio'), boneMineralDensity: number('bone_mineral_density_g_cm2'), reportPath: value('report'), notes });
+  }
+  return scans.sort((a, b) => b.date.localeCompare(a.date));
 }
 
 function hevyWorkoutCachePath(vaultPath = '') {
@@ -163,6 +378,9 @@ async function readConfig() {
     let wrikeToken = '';
     let serviceNowPassword = '';
     let serviceNowToken = '';
+    let whoopClientSecret = '';
+    let whoopAccessToken = '';
+    let whoopRefreshToken = '';
     if (saved.encryptedToken && safeStorage.isEncryptionAvailable()) {
       todoistToken = safeStorage.decryptString(Buffer.from(saved.encryptedToken, 'base64'));
     }
@@ -172,6 +390,9 @@ async function readConfig() {
     if (saved.encryptedWrikeToken && safeStorage.isEncryptionAvailable()) wrikeToken = safeStorage.decryptString(Buffer.from(saved.encryptedWrikeToken, 'base64'));
     if (saved.encryptedServiceNowPassword && safeStorage.isEncryptionAvailable()) serviceNowPassword = safeStorage.decryptString(Buffer.from(saved.encryptedServiceNowPassword, 'base64'));
     if (saved.encryptedServiceNowToken && safeStorage.isEncryptionAvailable()) serviceNowToken = safeStorage.decryptString(Buffer.from(saved.encryptedServiceNowToken, 'base64'));
+    if (saved.encryptedWhoopClientSecret && safeStorage.isEncryptionAvailable()) whoopClientSecret = safeStorage.decryptString(Buffer.from(saved.encryptedWhoopClientSecret, 'base64'));
+    if (saved.encryptedWhoopAccessToken && safeStorage.isEncryptionAvailable()) whoopAccessToken = safeStorage.decryptString(Buffer.from(saved.encryptedWhoopAccessToken, 'base64'));
+    if (saved.encryptedWhoopRefreshToken && safeStorage.isEncryptionAvailable()) whoopRefreshToken = safeStorage.decryptString(Buffer.from(saved.encryptedWhoopRefreshToken, 'base64'));
     return {
       vaultPath: saved.vaultPath || '',
       dailyFolder: shared.dailyFolder || saved.dailyFolder || 'Daily',
@@ -195,8 +416,13 @@ async function readConfig() {
       serviceNowAuthType: ['apiKey', 'bearer', 'basic'].includes(saved.serviceNowAuthType) ? saved.serviceNowAuthType : (saved.encryptedServiceNowPassword ? 'basic' : 'apiKey'),
       serviceNowToken,
       serviceNowPassword,
+      whoopClientId: saved.whoopClientId || '',
+      whoopClientSecret,
+      whoopAccessToken,
+      whoopRefreshToken,
+      whoopExpiresAt: Number(saved.whoopExpiresAt) || 0,
       wellnessFolder: shared.wellnessFolder || saved.wellnessFolder || 'Wellness',
-      modules: { habits: (shared.modules ?? saved.modules)?.habits !== false, wellness: (shared.modules ?? saved.modules)?.wellness !== false, todoist: (shared.modules ?? saved.modules)?.todoist !== false, hevy: (shared.modules ?? saved.modules)?.hevy !== false, wrike: (shared.modules ?? saved.modules)?.wrike !== false, serviceNow: (shared.modules ?? saved.modules)?.serviceNow !== false },
+      modules: { habits: (shared.modules ?? saved.modules)?.habits !== false, wellness: (shared.modules ?? saved.modules)?.wellness !== false, todoist: (shared.modules ?? saved.modules)?.todoist !== false, hevy: (shared.modules ?? saved.modules)?.hevy !== false, wrike: (shared.modules ?? saved.modules)?.wrike !== false, serviceNow: (shared.modules ?? saved.modules)?.serviceNow !== false, whoop: (shared.modules ?? saved.modules)?.whoop !== false },
       appearance: {
         mode: ['system', 'light', 'dark'].includes((shared.appearance ?? saved.appearance)?.mode) ? (shared.appearance ?? saved.appearance).mode : 'system',
         color: ['blue', 'violet', 'green', 'rose', 'amber'].includes((shared.appearance ?? saved.appearance)?.color) ? (shared.appearance ?? saved.appearance).color : 'blue'
@@ -211,8 +437,8 @@ async function readConfig() {
       matrixFilters: { do: '', schedule: '', delegate: '', later: '' },
       calendarEnabled: false,
       calendarSupported: process.platform === 'darwin',
-      todoistToken: '', hevyApiKey: '', wrikeToken: '', wrikeHost: 'https://www.wrike.com', serviceNowInstance: '', serviceNowUser: '', serviceNowAuthType: 'apiKey', serviceNowToken: '', serviceNowPassword: '', wellnessFolder: 'Wellness',
-      modules: { habits: true, wellness: true, todoist: true, hevy: true, wrike: true, serviceNow: true },
+      todoistToken: '', hevyApiKey: '', wrikeToken: '', wrikeHost: 'https://www.wrike.com', serviceNowInstance: '', serviceNowUser: '', serviceNowAuthType: 'apiKey', serviceNowToken: '', serviceNowPassword: '', whoopClientId: '', whoopClientSecret: '', whoopAccessToken: '', whoopRefreshToken: '', whoopExpiresAt: 0, wellnessFolder: 'Wellness',
+      modules: { habits: true, wellness: true, todoist: true, hevy: true, wrike: true, serviceNow: true, whoop: true },
       appearance: { mode: 'system', color: 'blue' }
     };
   }
@@ -228,7 +454,10 @@ async function writeConfig(next) {
   const wrikeToken = next.wrikeToken ?? old.wrikeToken;
   const serviceNowPassword = next.serviceNowPassword ?? old.serviceNowPassword;
   const serviceNowToken = next.serviceNowToken ?? old.serviceNowToken;
-  if ((token || hevyApiKey || wrikeToken || serviceNowPassword || serviceNowToken) && !safeStorage.isEncryptionAvailable()) {
+  const whoopClientSecret = String(next.whoopClientSecret || old.whoopClientSecret || '');
+  const whoopAccessToken = next.whoopAccessToken ?? old.whoopAccessToken;
+  const whoopRefreshToken = next.whoopRefreshToken ?? old.whoopRefreshToken;
+  if ((token || hevyApiKey || wrikeToken || serviceNowPassword || serviceNowToken || whoopClientSecret || whoopAccessToken || whoopRefreshToken) && !safeStorage.isEncryptionAvailable()) {
     throw new Error('Secure storage is unavailable on this device, so Daybook cannot save integration credentials safely.');
   }
   const saved = {
@@ -245,6 +474,8 @@ async function writeConfig(next) {
     serviceNowInstance: normalizeServiceNowInstance(next.serviceNowInstance ?? old.serviceNowInstance),
     serviceNowUser: String(next.serviceNowUser ?? old.serviceNowUser).trim().slice(0, 200),
     serviceNowAuthType: ['apiKey', 'bearer', 'basic'].includes(next.serviceNowAuthType) ? next.serviceNowAuthType : old.serviceNowAuthType,
+    whoopClientId: String(next.whoopClientId ?? old.whoopClientId).trim().slice(0, 200),
+    whoopExpiresAt: Number(next.whoopExpiresAt ?? old.whoopExpiresAt) || 0,
     morningRoutine: next.morningRoutine ?? base.morningRoutine,
     eveningRoutine: next.eveningRoutine ?? base.eveningRoutine,
     matrixFilters: next.matrixFilters ?? base.matrixFilters,
@@ -262,12 +493,82 @@ async function writeConfig(next) {
       : '',
     encryptedWrikeToken: wrikeToken && safeStorage.isEncryptionAvailable() ? safeStorage.encryptString(wrikeToken).toString('base64') : '',
     encryptedServiceNowPassword: serviceNowPassword && safeStorage.isEncryptionAvailable() ? safeStorage.encryptString(serviceNowPassword).toString('base64') : '',
-    encryptedServiceNowToken: serviceNowToken && safeStorage.isEncryptionAvailable() ? safeStorage.encryptString(serviceNowToken).toString('base64') : ''
+    encryptedServiceNowToken: serviceNowToken && safeStorage.isEncryptionAvailable() ? safeStorage.encryptString(serviceNowToken).toString('base64') : '',
+    encryptedWhoopClientSecret: whoopClientSecret && safeStorage.isEncryptionAvailable() ? safeStorage.encryptString(whoopClientSecret).toString('base64') : '',
+    encryptedWhoopAccessToken: whoopAccessToken && safeStorage.isEncryptionAvailable() ? safeStorage.encryptString(whoopAccessToken).toString('base64') : '',
+    encryptedWhoopRefreshToken: whoopRefreshToken && safeStorage.isEncryptionAvailable() ? safeStorage.encryptString(whoopRefreshToken).toString('base64') : ''
   };
   await fs.mkdir(path.dirname(userConfigPath()), { recursive: true });
   await fs.writeFile(userConfigPath(), JSON.stringify(saved, null, 2), 'utf8');
   await writeSharedSettings(saved.vaultPath, saved);
-  return { ...saved, calendarSupported: process.platform === 'darwin', todoistToken: token, hevyApiKey, wrikeToken, serviceNowToken, serviceNowPassword, wellnessFolder: saved.wellnessFolder, attachmentsFolder: saved.attachmentsFolder, workoutPlans: saved.workoutPlans || {} };
+  return { ...saved, calendarSupported: process.platform === 'darwin', todoistToken: token, hevyApiKey, wrikeToken, serviceNowToken, serviceNowPassword, whoopClientSecret, whoopAccessToken, whoopRefreshToken, wellnessFolder: saved.wellnessFolder, attachmentsFolder: saved.attachmentsFolder, workoutPlans: saved.workoutPlans || {} };
+}
+
+const WHOOP_REDIRECT_URI = 'http://localhost:43821/whoop/callback';
+async function whoopTokenRequest(body, config) {
+  const response = await fetch('https://api.prod.whoop.com/oauth/oauth2/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' }, body: new URLSearchParams({ ...body, client_id: config.whoopClientId, client_secret: config.whoopClientSecret }).toString() });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || !payload.access_token) throw new Error(payload.error_description || payload.message || `WHOOP token request failed (${response.status}).`);
+  const updated = await writeConfig({ ...config, whoopAccessToken: payload.access_token, whoopRefreshToken: payload.refresh_token || config.whoopRefreshToken, whoopExpiresAt: Date.now() + (Number(payload.expires_in) || 3600) * 1000 });
+  return updated;
+}
+
+async function handleWhoopConnect() {
+  const config = await readConfig();
+  if (!config.whoopClientId || !config.whoopClientSecret) throw new Error('Enter your WHOOP Client ID and Client Secret in Settings first.');
+  const state = crypto.randomBytes(16).toString('hex');
+  const server = http.createServer();
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(43821, '127.0.0.1', resolve);
+  }).catch((error) => { throw new Error(error.code === 'EADDRINUSE' ? 'The WHOOP sign-in return address is already in use. Close the other Daybook window and try again.' : `Could not start WHOOP sign-in (${error.message}).`); });
+  const callback = new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('WHOOP sign-in timed out. Try connecting again.')), 180000);
+    server.on('request', (req, res) => {
+      const url = new URL(req.url, WHOOP_REDIRECT_URI);
+      if (url.pathname !== '/whoop/callback') { res.writeHead(404).end(); return; }
+      if (url.searchParams.get('state') !== state) { res.writeHead(400).end('Sign-in could not be verified. Return to Daybook and try again.'); clearTimeout(timeout); reject(new Error('WHOOP sign-in could not be verified.')); return; }
+      const code = url.searchParams.get('code');
+      const denied = url.searchParams.get('error_description') || url.searchParams.get('error');
+      res.writeHead(code ? 200 : 400, { 'Content-Type': 'text/html; charset=utf-8' }).end(`<html><body style="font:16px -apple-system;padding:40px;color:#222"><h2>${code ? 'WHOOP connected' : 'WHOOP connection not completed'}</h2><p>You can return to Daybook.</p></body></html>`);
+      clearTimeout(timeout);
+      if (code) resolve(code); else reject(new Error(denied || 'WHOOP authorization was canceled.'));
+    });
+  });
+  try {
+    const params = new URLSearchParams({ client_id: config.whoopClientId, redirect_uri: WHOOP_REDIRECT_URI, response_type: 'code', scope: 'offline read:recovery read:cycles read:workout read:sleep read:body_measurement', state });
+    await shell.openExternal(`https://api.prod.whoop.com/oauth/oauth2/auth?${params}`);
+    const code = await callback;
+    const updated = await whoopTokenRequest({ grant_type: 'authorization_code', code, redirect_uri: WHOOP_REDIRECT_URI }, config);
+    return { connected: true, config: updated };
+  } finally { server.close(); }
+}
+
+async function whoopGet(pathname, config) {
+  const current = config;
+  if (!current.whoopAccessToken) return { connected: false, recovery: null, sleep: null, cycle: null, workouts: [] };
+  const response = await fetch(`https://api.prod.whoop.com/developer/v2/${pathname}`, { headers: { Authorization: `Bearer ${current.whoopAccessToken}`, Accept: 'application/json' } });
+  if (!response.ok) throw new Error(response.status === 401 ? 'WHOOP authorization expired or was revoked. Reconnect in Settings.' : `WHOOP data request failed (${response.status}).`);
+  return response.json();
+}
+
+async function handleWhoopSummary() {
+  let config = await readConfig();
+  if (!config.whoopAccessToken && !config.whoopRefreshToken) return { connected: false, recovery: null, sleep: null, cycle: null, workouts: [] };
+  if ((!config.whoopAccessToken || config.whoopExpiresAt < Date.now() + 60000) && config.whoopRefreshToken) config = await whoopTokenRequest({ grant_type: 'refresh_token', refresh_token: config.whoopRefreshToken, scope: 'offline' }, config);
+  const start = new Date(Date.now() - 10 * 86400000).toISOString();
+  const end = new Date(Date.now() + 86400000).toISOString();
+  const range = `?limit=25&start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`;
+  const [recovery, sleep, cycle, workouts, body] = await Promise.all([
+    whoopGet(`recovery${range}`, config), whoopGet(`sleep${range}`, config), whoopGet(`cycle${range}`, config), whoopGet(`workout${range}`, config), whoopGet('user/measurement/body', config).catch(() => null)
+  ]);
+  const latest = (result) => (result.records || []).sort((a, b) => String(b.created_at || b.start || '').localeCompare(String(a.created_at || a.start || '')))[0] || null;
+  return { connected: true, recovery: latest(recovery), sleep: latest(sleep), cycle: latest(cycle), workouts: (workouts.records || []).slice(0, 5), body, refreshedAt: new Date().toISOString() };
+}
+
+function publicConfig(config) {
+  const { whoopClientSecret, whoopAccessToken, whoopRefreshToken, ...visible } = config;
+  return { ...visible, whoopConnected: Boolean(whoopAccessToken || whoopRefreshToken) };
 }
 
 function ensureConfigured(config) {
@@ -504,6 +805,7 @@ function parseHabit(filePath, content, root) {
     name,
     relativePath: path.relative(root, filePath).split(path.sep).join('/'),
     completed,
+    color: frontmatter[1].match(/^color:\s*['"]?(#[0-9a-fA-F]{6})['"]?\s*$/m)?.[1]?.toLowerCase() || '',
     frequency: frontmatter[1].match(/^frequency:\s*(.*)$/m)?.[1]?.trim() || 'daily'
   };
 }
@@ -1654,8 +1956,8 @@ async function handleCreateObsidianTaskFromJournal(date, text, tags = [], dueDat
   return { created: true, relativePath: relative };
 }
 
-function formatHabitFrontmatter(name, frequency) {
-  return `---\ntype: habit\nhabit: true\nfrequency: ${frequency || 'daily'}\ncompleted: []\n---\n\n# ${name}\n\nA small practice, repeated with care.\n`;
+function formatHabitFrontmatter(name, frequency, color) {
+  return `---\ntype: habit\nhabit: true\nfrequency: ${frequency || 'daily'}\ncolor: ${color}\ncompleted: []\n---\n\n# ${name}\n\nA small practice, repeated with care.\n`;
 }
 
 async function handleListHabits() {
@@ -1669,6 +1971,63 @@ async function handleListHabits() {
     if (habit) habits.push(habit);
   }
   return habits.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function habitCommitmentFile(config) {
+  return path.join(daybookDataFolder(config.vaultPath), 'habit-commitments.json');
+}
+
+async function handleListHabitCommitments() {
+  const config = await readConfig();
+  ensureConfigured(config);
+  try {
+    const commitments = JSON.parse(await fs.readFile(habitCommitmentFile(config), 'utf8'));
+    return Array.isArray(commitments)
+      ? commitments.filter((item) => item && typeof item.id === 'string' && ['month', 'quarter'].includes(item.period) && /^\d{4}-\d{2}-\d{2}$/.test(item.startDate) && /^\d{4}-\d{2}-\d{2}$/.test(item.endDate) && Array.isArray(item.habits))
+      : [];
+  } catch (error) {
+    if (error.code === 'ENOENT') return [];
+    throw new Error('Could not read saved habit commitments in this vault.');
+  }
+}
+
+async function handleSaveHabitCommitment(input) {
+  const config = await readConfig();
+  ensureConfigured(config);
+  const period = input?.period === 'quarter' ? 'quarter' : input?.period === 'month' ? 'month' : '';
+  const startDate = String(input?.startDate || '');
+  const endDate = String(input?.endDate || '');
+  ensureDate(startDate);
+  ensureDate(endDate);
+  if (!period || startDate > endDate) throw new Error('Choose a valid month or quarter.');
+  const requestedPaths = Array.isArray(input?.habits) ? [...new Set(input.habits.map((item) => String(item?.relativePath || '')))].filter(Boolean) : [];
+  if (!requestedPaths.length) throw new Error('Select at least one habit for this commitment.');
+  const selectedHabits = [];
+  for (const relativePath of requestedPaths) {
+    const full = path.resolve(config.vaultPath, relativePath.split('/').join(path.sep));
+    const relative = path.relative(config.vaultPath, full);
+    if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error('A selected habit is outside the vault.');
+    const habit = parseHabit(full, await fs.readFile(full, 'utf8'), config.vaultPath);
+    if (!habit) throw new Error('One of the selected notes is no longer marked as a habit. Refresh and try again.');
+    selectedHabits.push({ relativePath: habit.relativePath, name: habit.name, frequency: habit.frequency, color: habit.color });
+  }
+  const file = habitCommitmentFile(config);
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  const commitments = await handleListHabitCommitments();
+  const overlapping = commitments.find((item) => startDate <= item.endDate && endDate >= item.startDate);
+  if (overlapping) throw new Error(`This period overlaps “${overlapping.name}”. Choose a period after it ends.`);
+  const commitment = {
+    id: `${Date.now()}-${period}`,
+    name: String(input?.name || '').trim().slice(0, 100) || `${period === 'quarter' ? 'Quarter' : 'Month'} ${startDate.slice(0, 7)}`,
+    period,
+    startDate,
+    endDate,
+    createdAt: new Date().toISOString(),
+    habits: selectedHabits
+  };
+  commitments.push(commitment);
+  await fs.writeFile(file, JSON.stringify(commitments, null, 2), 'utf8');
+  return commitments;
 }
 
 async function handleListProtocol(date) {
@@ -2049,7 +2408,7 @@ async function handleCreateProtocolItem(name, category, timing, frequency, descr
   return { relativePath: path.relative(config.vaultPath, full).split(path.sep).join('/'), name: clean };
 }
 
-async function handleCreateHabit(name, frequency) {
+async function handleCreateHabit(name, frequency, color = '#35ce2b') {
   const config = await readConfig();
   ensureConfigured(config);
   const clean = name.trim().replace(/[\r\n]+/g, ' ').replace(/[\\/:*?"<>|]/g, '-').replace(/\s+/g, ' ');
@@ -2062,8 +2421,27 @@ async function handleCreateHabit(name, frequency) {
     try { await fs.access(full); full = path.join(folder, `${clean} ${suffix++}.md`); }
     catch { break; }
   }
-  await fs.writeFile(full, formatHabitFrontmatter(clean, frequency), 'utf8');
+  const normalizedColor = /^#[0-9a-f]{6}$/i.test(String(color)) ? String(color).toLowerCase() : '#35ce2b';
+  await fs.writeFile(full, formatHabitFrontmatter(clean, frequency, normalizedColor), 'utf8');
   return { relativePath: path.relative(config.vaultPath, full).split(path.sep).join('/'), name: clean };
+}
+
+async function handleSetHabitColor(relativePath, color) {
+  const config = await readConfig();
+  ensureConfigured(config);
+  if (!/^#[0-9a-f]{6}$/i.test(String(color))) throw new Error('Choose a valid habit color.');
+  const full = path.resolve(config.vaultPath, String(relativePath || '').split('/').join(path.sep));
+  const relative = path.relative(config.vaultPath, full);
+  if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error('That habit is outside the selected vault.');
+  const content = await fs.readFile(full, 'utf8');
+  const frontmatter = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!frontmatter || !isHabitFrontmatter(frontmatter[1])) throw new Error('This note is no longer marked as a habit.');
+  const meta = frontmatter[1];
+  const nextMeta = /^color:[^\r\n]*$/m.test(meta)
+    ? meta.replace(/^color:[^\r\n]*$/m, `color: ${String(color).toLowerCase()}`)
+    : `${meta.trimEnd()}\ncolor: ${String(color).toLowerCase()}`;
+  await fs.writeFile(full, content.replace(frontmatter[1], nextMeta), 'utf8');
+  return { color: String(color).toLowerCase() };
 }
 
 async function handleListObsidianTasks() {
@@ -2544,8 +2922,8 @@ async function handleOpenNativeTask(source, id) {
 }
 
 function registerIpc() {
-  ipcMain.handle('config:get', readConfig);
-  ipcMain.handle('config:save', (_event, next) => writeConfig(next));
+  ipcMain.handle('config:get', async () => publicConfig(await readConfig()));
+  ipcMain.handle('config:save', async (_event, next) => publicConfig(await writeConfig(next)));
   ipcMain.handle('hevy:developer-settings', () => shell.openExternal('https://hevy.com/settings?developer'));
   ipcMain.handle('vault:choose', async () => {
     const result = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory'] });
@@ -2577,6 +2955,8 @@ function registerIpc() {
   ipcMain.handle('day:save', (_event, date, day, expectedBlock) => handleSaveDay(date, day, expectedBlock));
   ipcMain.handle('obsidian-tasks:create-from-journal', (_event, date, text, tags, dueDate, priority) => handleCreateObsidianTaskFromJournal(date, text, tags, dueDate, priority));
   ipcMain.handle('habits:list', handleListHabits);
+  ipcMain.handle('habits:commitments:list', handleListHabitCommitments);
+  ipcMain.handle('habits:commitments:save', (_event, commitment) => handleSaveHabitCommitment(commitment));
   ipcMain.handle('protocol:list', (_event, date) => handleListProtocol(date));
   ipcMain.handle('protocol:committed:list', (_event, date) => handleListCommittedProtocol(date));
   ipcMain.handle('protocol:bundles:list', handleListProtocolBundles);
@@ -2591,7 +2971,8 @@ function registerIpc() {
   ipcMain.handle('protocol:frequency', (_event, file, frequency) => handleSetProtocolFrequency(file, frequency));
   ipcMain.handle('protocol:create', (_event, name, category, timing, frequency, description, date) => handleCreateProtocolItem(name, category, timing, frequency, description, date));
   ipcMain.handle('habits:toggle', (_event, file, date) => handleToggleHabit(file, date));
-  ipcMain.handle('habits:create', (_event, name, frequency) => handleCreateHabit(name, frequency));
+  ipcMain.handle('habits:create', (_event, name, frequency, color) => handleCreateHabit(name, frequency, color));
+  ipcMain.handle('habits:color', (_event, file, color) => handleSetHabitColor(file, color));
   ipcMain.handle('todoist:filters', handleGetTodoistFilters);
   ipcMain.handle('todoist:list', handleGetTasks);
   ipcMain.handle('todoist:projects', handleListTodoistProjects);
@@ -2603,6 +2984,13 @@ function registerIpc() {
   ipcMain.handle('servicenow:list', handleListServiceNowTasks);
   ipcMain.handle('hevy:workouts', handleListHevyWorkouts);
   ipcMain.handle('hevy:cache', handleGetCachedHevyWorkouts);
+  ipcMain.handle('whoop:connect', async () => { const result = await handleWhoopConnect(); return { connected: result.connected, config: publicConfig(result.config) }; });
+  ipcMain.handle('whoop:summary', handleWhoopSummary);
+  ipcMain.handle('weight:list', handleListWeightReadings);
+  ipcMain.handle('weight:import-garmin', handleImportGarminWeightCsv);
+  ipcMain.handle('dexa:list', handleListDexaScans);
+  ipcMain.handle('dexa:choose-report', (_event, date) => handleChooseDexaReport(date));
+  ipcMain.handle('dexa:save', (_event, scan) => handleSaveDexaScan(scan));
   ipcMain.handle('obsidian-tasks:list', handleListObsidianTasks);
   ipcMain.handle('obsidian-tasks:properties', (_event, file, line, text, dueDate, priority) => handleUpdateObsidianTaskProperties(file, line, text, dueDate, priority));
   ipcMain.handle('obsidian-tasks:complete', (_event, file, line, text) => handleToggleObsidianTask(file, line, text));

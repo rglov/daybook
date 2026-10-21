@@ -12,6 +12,7 @@ Daybook is a local desktop app for planning your day and keeping work and person
 - **People:** Keep person notes in Obsidian and see meetings, tasks, and projects linked to each person.
 - **Protocols:** Build dated cycles and recurring bundles from Wellness notes, then track the expected items and adherence.
 - **Workouts:** Review workout history and stats synced from Hevy.
+- **Weight & body composition:** Import a Garmin Connect weight report CSV and add dated DEXA scan measurements with an optional attached report.
 
 ## Requirements
 
@@ -41,6 +42,8 @@ On first launch, open **Settings** and choose your Obsidian vault. Set the folde
 - **Wrike:** Add a permanent access token and, if needed, the Wrike API host in Settings.
 - **ServiceNow:** Add your instance host and user name, then choose API key, OAuth bearer token, or username and password. The user name is used to filter records assigned to you. API key authentication must be enabled in your ServiceNow instance; bearer tokens may expire.
 - **Hevy:** Add your API key in Settings. Workout history is cached locally to make the dashboard faster and available between syncs.
+- **Garmin Connect weight:** Export a weight report CSV from Garmin Connect, then use **Import Garmin CSV** on the Weight page. This is a manual import; Garmin’s official Health API is currently offered through its business developer program.
+- **DEXA:** On the Weight page, add a scan date, enter measurements from your report, and optionally attach its PDF or image. Daybook creates a note under `Wellness/DEXA Scans` and copies the report to the configured attachments folder.
 
 ## Obsidian data
 
@@ -48,7 +51,7 @@ Daybook writes notes and task updates directly to the selected vault. Folder nam
 
 Daily journal entries are added under the daily note’s `# Log` heading with a `YYYYMMDDHHmmss` timestamp. Meeting notes and project notes are Markdown files in their configured folders. Tasks created in Obsidian are Markdown checkboxes; completing an Obsidian task updates its original note.
 
-Daybook stores syncable app data in the visible `Daybook` folder in the vault: protocol bundles, protocol cycles, shared preferences (appearance, enabled modules, folder settings, routines, task filters, and workout plans), and cached workout history. Keep the vault in Obsidian Sync and choose that vault in Daybook on each device to sync this data. Daily notes, projects, meetings, people, protocol cycles, and Obsidian tasks are already stored in the vault. Existing data in the older hidden `.daybook` folder is copied into `Daybook` when the vault is opened; the old files are left in place as a backup.
+Daybook stores syncable app data in the vault’s `SYSTEM/DAYBOOK` folder: protocol bundles and cycles, fixed habit commitments, shared preferences (appearance, enabled modules, folder settings, routines, task filters, and workout plans), cached workout history, and imported weight readings. DEXA scan records are Markdown notes in the configured Wellness folder under `DEXA Scans`; attached report files go in the configured attachments folder. Habit commitments snapshot the selected habits and their frequencies for a one-month or three-month period so adherence stays comparable if the habit list later changes. Keep the vault in Obsidian Sync and choose that vault in Daybook on each device to sync this data. Daily notes, projects, meetings, people, protocol cycles, habits, and Obsidian tasks are stored in the vault. Existing files in the previous `Daybook` and hidden `.daybook` folders are copied into `SYSTEM/DAYBOOK` when the vault is opened; the original files are left in place as a backup. API keys, passwords, and device permissions remain in local app settings and are not synced.
 
 ## Credential storage
 

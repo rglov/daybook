@@ -31,6 +31,7 @@ const state = {
   collapsedWeekProjects: new Set(),
   day: { plan: [], selectedWork: [], calendarChecks: {}, morning: [], evening: [], journal: '' },
   habits: [],
+  habitCommitments: [],
   habitCalendarStart: new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate() - 14),
   habitCalendarDays: 15,
   protocolItems: [],
@@ -78,6 +79,15 @@ const state = {
   hevyFromCache: false,
   hevyLoaded: false,
   hevyLoading: false,
+  whoopSummary: null,
+  whoopError: '',
+  whoopLoading: false,
+  weightReadings: [],
+  weightRange: '30d',
+  weightChartReadings: [],
+  weightChartPoints: [],
+  dexaScans: [],
+  dexaDraftReport: null,
   calendarEvents: [],
   calendarLoading: false,
   calendarSupported: true,
@@ -1003,44 +1013,358 @@ function frequencyLabel(value) {
   return ({ daily: 'Daily', weekdays: 'Weekdays', weekly: 'Weekly' })[normalized] || value;
 }
 
+function renderHabitDashboard(habits, todayDate, commitment = null) {
+  const today = localDateString(todayDate);
+  const weekKeyForDate = (dateString) => {
+    const date = new Date(`${dateString}T12:00:00`);
+    date.setDate(date.getDate() - ((date.getDay() + 6) % 7));
+    return localDateString(date);
+  };
+  const months = commitment
+    ? (() => {
+      const first = new Date(`${commitment.startDate}T12:00:00`);
+      const last = new Date(`${commitment.endDate}T12:00:00`);
+      const monthStarts = [];
+      for (let month = new Date(first.getFullYear(), first.getMonth(), 1); month <= last; month.setMonth(month.getMonth() + 1)) monthStarts.push(new Date(month));
+      return monthStarts;
+    })()
+    : [2, 1, 0].map((offset) => new Date(todayDate.getFullYear(), todayDate.getMonth() - offset, 1));
+  const monthStats = months.map((monthDate) => {
+    const year = monthDate.getFullYear();
+    const month = monthDate.getMonth();
+    const first = new Date(year, month, 1);
+    const lastOfMonth = new Date(year, month + 1, 0);
+    const rangeStart = commitment && commitment.startDate > localDateString(first) ? new Date(`${commitment.startDate}T12:00:00`) : first;
+    const rangeEndDate = commitment && commitment.endDate < localDateString(lastOfMonth) ? new Date(`${commitment.endDate}T12:00:00`) : lastOfMonth;
+    const observedEnd = rangeEndDate < todayDate ? rangeEndDate : todayDate;
+    const hasObservedDates = rangeStart <= observedEnd;
+    const days = [];
+    const weeks = new Map();
+    for (let date = new Date(rangeStart); hasObservedDates && date <= observedEnd; date.setDate(date.getDate() + 1)) {
+      const current = new Date(date);
+      const dateString = localDateString(current);
+      const weekKey = weekKeyForDate(dateString);
+      if (!weeks.has(weekKey)) weeks.set(weekKey, []);
+      weeks.get(weekKey).push(dateString);
+      let expected = 0;
+      let completed = 0;
+      let weeklyCheckins = 0;
+      for (const habit of habits) {
+        const frequency = String(habit.frequency || 'daily').toLowerCase();
+        const checkins = new Set(habit.completed || []);
+        if (frequency === 'weekly') {
+          if (checkins.has(dateString)) weeklyCheckins += 1;
+          continue;
+        }
+        const scheduled = frequency === 'daily' || (frequency === 'weekdays' && current.getDay() !== 0 && current.getDay() !== 6);
+        if (!scheduled) continue;
+        expected += 1;
+        if (checkins.has(dateString)) completed += 1;
+      }
+      days.push({ date: current, dateString, expected, completed, weeklyCheckins });
+    }
+
+    let expectedTotal = 0;
+    let completedTotal = 0;
+    for (const habit of habits) {
+      const frequency = String(habit.frequency || 'daily').toLowerCase();
+      const checkins = new Set((habit.completed || []).filter((date) => date <= today));
+      if (frequency === 'weekly') {
+        const completedWeeks = new Set([...checkins].filter((date) => date >= localDateString(rangeStart) && date <= localDateString(observedEnd)).map(weekKeyForDate));
+        for (const weekDays of weeks.values()) {
+          expectedTotal += 1;
+          if (completedWeeks.has(weekKeyForDate(weekDays[0]))) completedTotal += 1;
+        }
+        continue;
+      }
+      for (const day of days) {
+        const scheduled = frequency === 'daily' || (frequency === 'weekdays' && day.date.getDay() !== 0 && day.date.getDay() !== 6);
+        if (!scheduled) continue;
+        expectedTotal += 1;
+        if (checkins.has(day.dateString)) completedTotal += 1;
+      }
+    }
+    const rate = expectedTotal ? Math.round((completedTotal / expectedTotal) * 100) : 0;
+    const leading = (first.getDay() + 6) % 7;
+    const cells = Array.from({ length: leading }, () => '<span class="quarter-heat-cell is-empty" aria-hidden="true"></span>');
+    const dayByDate = new Map(days.map((day) => [day.dateString, day]));
+    for (let dayNumber = 1; dayNumber <= lastOfMonth.getDate(); dayNumber += 1) {
+      const date = new Date(year, month, dayNumber);
+      const dateString = localDateString(date);
+      const inCommitment = !commitment || (dateString >= commitment.startDate && dateString <= commitment.endDate);
+      const observed = inCommitment && dateString <= today;
+      const day = dayByDate.get(dateString);
+      const rateForDay = day?.expected ? day.completed / day.expected : 0;
+      const level = day?.expected ? Math.max(0, Math.min(4, Math.ceil(rateForDay * 4))) : 0;
+      const weeklyNote = day?.weeklyCheckins ? ` · ${day.weeklyCheckins} weekly ${day.weeklyCheckins === 1 ? 'check-in' : 'check-ins'}` : '';
+      const detail = day?.expected ? `${day.completed} of ${day.expected} daily habits completed` : 'No daily habits scheduled';
+      const label = `${date.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })} · ${detail}${weeklyNote}`;
+      const classes = `quarter-heat-cell ${observed ? `level-${level}` : 'is-outside'} ${dateString === today ? 'is-today' : ''} ${day?.weeklyCheckins ? 'has-weekly-checkin' : ''}`;
+      cells.push(`<span class="${classes}" ${observed ? `title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}"` : 'aria-hidden="true"'}>${dayNumber}</span>`);
+    }
+    while (cells.length % 7) cells.push('<span class="quarter-heat-cell is-empty" aria-hidden="true"></span>');
+    const calendar = ['M', 'T', 'W', 'T', 'F', 'S', 'S'].map((day) => `<span class="quarter-weekday">${day}</span>`).join('') + cells.join('');
+    return { date: monthDate, rate, completed: completedTotal, expected: expectedTotal, calendar };
+  });
+
+  const expected = monthStats.reduce((sum, month) => sum + month.expected, 0);
+  const completed = monthStats.reduce((sum, month) => sum + month.completed, 0);
+  const rate = expected ? Math.round((completed / expected) * 100) : 0;
+  const bestMonth = monthStats.reduce((best, month) => month.rate > best.rate && month.expected ? month : best, { rate: -1, expected: 0 });
+  const streaks = habits.map((habit) => {
+    const frequency = String(habit.frequency || 'daily').toLowerCase();
+    const periodDates = (habit.completed || []).filter((date) => date <= today && (!commitment || (date >= commitment.startDate && date <= commitment.endDate)));
+    return {
+      name: habit.name,
+      frequency,
+      streak: commitment ? habitLongestStreak(periodDates, frequency) : habitCurrentStreak(new Set(periodDates), today, frequency)
+    };
+  });
+  const bestStreak = streaks.reduce((best, current) => current.streak > best.streak ? current : best, { name: '', streak: 0, frequency: 'daily' });
+  const activeStreaks = streaks.filter((item) => item.streak > 0).length;
+  const monthCards = monthStats.map((month) => `<article class="quarter-month-card ${month.date.getFullYear() === todayDate.getFullYear() && month.date.getMonth() === todayDate.getMonth() ? 'current-month' : ''}"><header><div><h3>${escapeHtml(month.date.toLocaleDateString(undefined, { month: 'long' }))}</h3><span>${month.date.getFullYear()} · ${month.completed} / ${month.expected} check-ins</span></div><strong>${month.expected ? `${month.rate}%` : '—'}</strong></header><div class="quarter-month-grid">${month.calendar}</div></article>`).join('');
+  const legend = '<div class="quarter-heat-legend"><span>Less</span><i class="level-0"></i><i class="level-1"></i><i class="level-2"></i><i class="level-3"></i><i class="level-4"></i><span>More</span><i class="weekly-marker-sample"></i><span>weekly check-in</span><small>Daily adherence</small></div>';
+  const periodLabel = commitment ? `${escapeHtml(prettyDate(commitment.startDate, { month: 'short', day: 'numeric', year: 'numeric' }))} – ${escapeHtml(prettyDate(commitment.endDate, { month: 'short', day: 'numeric', year: 'numeric' }))}` : 'Rolling view · all current habits';
+  const commitmentStatus = commitment ? (today < commitment.startDate ? 'UP NEXT' : today > commitment.endDate ? 'COMPLETED PERIOD' : 'ACTIVE COMMITMENT') : 'YOUR LAST THREE MONTHS';
+  const commitmentAction = `<button class="button secondary habit-commitment-action" type="button" data-create-habit-commitment>${commitment ? 'Plan next period' : 'Commit to a period'}</button>`;
+  const committedHabitChips = commitment ? `<div class="habit-commitment-chips">${commitment.habits.map((habit, index) => {
+    const color = /^#[0-9a-f]{6}$/i.test(habit.color || '') ? habit.color : ['#35ce2b', '#27aaf1', '#ffdc39', '#ff712d'][index % 4];
+    return `<span><i style="--habit-chip-color:${color}"></i>${escapeHtml(habit.name)}</span>`;
+  }).join('')}</div>` : '';
+  return `<section class="habit-quarter-dashboard"><div class="habit-quarter-header"><div><p class="eyebrow">${commitmentStatus}</p><h2>${commitment ? escapeHtml(commitment.name) : 'Consistency'}</h2><p>${commitment ? `${commitment.habits.length} committed habits · ${periodLabel}` : 'See your rhythm day by day, then zoom out to the bigger picture.'}</p>${committedHabitChips}</div><div class="quarter-score" style="--quarter-progress:${rate}%"><div><strong>${expected ? `${rate}%` : '—'}</strong><span>adherence</span></div></div>${commitmentAction}</div><div class="quarter-months">${monthCards}</div>${legend}<div class="quarter-insights"><div><span>Check-ins</span><strong>${completed} <small>/ ${expected}</small></strong></div><div><span>Strongest month</span><strong>${bestMonth.expected ? `${escapeHtml(bestMonth.date.toLocaleDateString(undefined, { month: 'short' }))} · ${bestMonth.rate}%` : '—'}</strong></div><div><span>${commitment ? 'Habits with a period streak' : 'Active streaks'}</span><strong>${activeStreaks} <small>/ ${habits.length}</small></strong></div><div><span>${commitment ? 'Best period run' : 'Best current run'}</span><strong>${bestStreak.streak ? `${bestStreak.streak}${bestStreak.frequency === 'weekly' ? ' wk' : ' d'} <small>· ${escapeHtml(bestStreak.name)}</small>` : '—'}</strong></div></div></section>`;
+}
+
 function renderHabitTracker() {
   const start = new Date(state.habitCalendarStart);
   const dayCount = state.habitCalendarDays || 15;
-  const datesInView = Array.from({ length: dayCount }, (_value, index) => new Date(start.getFullYear(), start.getMonth(), start.getDate() + index));
+  const datesInView = Array.from({ length: dayCount }, (_value, index) => new Date(start.getFullYear(), start.getMonth(), start.getDate() + dayCount - index - 1));
   const todayDate = new Date();
-  const today = localDateString(new Date());
+  const today = localDateString(todayDate);
   const habits = state.habits || [];
+  const commitments = [...(state.habitCommitments || [])].sort((a, b) => a.startDate.localeCompare(b.startDate));
   const grid = $('#habit-heatmap');
+  const dashboard = $('#habit-dashboard');
   const latestStart = new Date(todayDate.getFullYear(), todayDate.getMonth(), todayDate.getDate() - (dayCount - 1));
   $('#habit-tracker-empty').classList.toggle('hidden', habits.length > 0);
   grid.classList.toggle('hidden', habits.length === 0);
-  if (!habits.length) { grid.innerHTML = ''; return; }
+  dashboard.classList.toggle('hidden', habits.length === 0);
+  if (!habits.length) { grid.innerHTML = ''; dashboard.innerHTML = ''; return; }
 
-  const columns = `minmax(150px,1fr) 20px repeat(${dayCount},minmax(34px,1fr)) 20px repeat(3,42px)`;
+  const commitment = commitments.find((item) => item.startDate <= today && item.endDate >= today)
+    || commitments.filter((item) => item.endDate < today).sort((a, b) => b.endDate.localeCompare(a.endDate))[0]
+    || commitments.filter((item) => item.startDate > today).sort((a, b) => a.startDate.localeCompare(b.startDate))[0]
+    || null;
+  const currentHabitsByPath = new Map(habits.map((habit) => [habit.relativePath, habit]));
+  const measuredHabits = commitment
+    ? commitment.habits.map((snapshot) => ({ ...snapshot, completed: currentHabitsByPath.get(snapshot.relativePath)?.completed || [] }))
+    : habits;
+  dashboard.innerHTML = renderHabitDashboard(measuredHabits, todayDate, commitment);
+
+  const columns = `minmax(230px,1.4fr) repeat(${dayCount},minmax(34px,1fr)) 20px repeat(3,42px)`;
   grid.style.setProperty('--habit-columns', columns);
-  const monthHeader = `<div class="habit-heatmap-header" style="grid-template-columns:${columns}"><strong class="habit-name-heading">HABITS</strong><button class="habit-range-arrow" data-habit-range="previous" type="button" aria-label="Previous range">‹</button>${datesInView.map((date) => {
+  const monthHeader = `<div class="habit-heatmap-header" style="grid-template-columns:${columns}"><strong class="habit-name-heading"><span>HABITS</span><button class="habit-range-arrow" data-habit-range="previous" type="button" aria-label="Previous range">‹</button></strong>${datesInView.map((date) => {
     const dateString = localDateString(date);
     return `<span class="habit-date-heading ${date.getDay() === 1 ? 'is-week-start' : ''} ${dateString === today ? 'is-today' : ''}" title="${escapeHtml(date.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' }))}"><small>${date.toLocaleDateString(undefined, { month: 'short' })}</small><b>${date.getDate()}</b><em>${date.toLocaleDateString(undefined, { weekday: 'short' })}</em></span>`;
   }).join('')}<button class="habit-range-arrow" data-habit-range="next" type="button" aria-label="Next range" ${start >= latestStart ? 'disabled' : ''}>›</button><strong class="habit-stat-heading">Current<br>streak</strong><strong class="habit-stat-heading">Longest<br>streak</strong><strong class="habit-stat-heading">Total<br>count</strong></div>`;
 
   const palette = ['green', 'green', 'green', 'green', 'green', 'green', 'blue', 'yellow', 'orange', 'yellow'];
+  const habitColors = { green: '#35ce2b', blue: '#27aaf1', yellow: '#ffdc39', orange: '#ff712d' };
+  const darkenHabitColor = (color, amount) => {
+    const channels = color.slice(1).match(/.{2}/g).map((channel) => parseInt(channel, 16));
+    return `#${channels.map((channel) => Math.round(channel * (1 - amount)).toString(16).padStart(2, '0')).join('')}`;
+  };
   const totals = Array.from({ length: dayCount }, (_value, index) => habits.reduce((count, habit) => count + ((habit.completed || []).includes(localDateString(datesInView[index])) ? 1 : 0), 0));
   const rows = habits.map((habit, habitIndex) => {
     const completed = new Set(habit.completed || []);
     const dates = Array.from(completed).filter((date) => /^\d{4}-\d{2}-\d{2}$/.test(date)).sort();
     const frequency = habit.frequency || 'daily';
+    const baseColor = habit.color || habitColors[palette[habitIndex % palette.length]];
     const currentStreak = habitCurrentStreak(completed, today, frequency);
     const longestStreak = habitLongestStreak(dates, frequency);
     const cells = datesInView.map((day) => {
       const date = localDateString(day);
       const done = completed.has(date);
       const future = date > today;
-      return `<button type="button" class="habit-heat-cell tone-${palette[habitIndex % palette.length]} ${done ? 'is-complete' : ''} ${date === today ? 'is-today' : ''}" data-habit-file="${escapeHtml(habit.relativePath)}" data-habit-date="${date}" aria-pressed="${done}" aria-label="${escapeHtml(habit.name)} · ${escapeHtml(date)} · ${done ? 'Done' : 'Not done'}" title="${escapeHtml(prettyDate(date, { weekday: 'long', month: 'long', day: 'numeric' }))} · ${done ? 'Done' : 'Not done'}" ${future ? 'disabled' : ''}></button>`;
+      let runLength = 0;
+      if (done) {
+        const runDate = new Date(`${date}T12:00:00`);
+        while (completed.has(localDateString(runDate))) {
+          runLength += 1;
+          runDate.setDate(runDate.getDate() - 1);
+        }
+      }
+      const darkness = Math.min(0.2, Math.max(0, runLength - 1) * 0.035);
+      const colorStyle = done ? ` style="background-color:${darkenHabitColor(baseColor, darkness)}"` : '';
+      return `<button type="button" class="habit-heat-cell tone-${palette[habitIndex % palette.length]} ${done ? 'is-complete' : ''} ${date === today ? 'is-today' : ''}"${colorStyle} data-habit-file="${escapeHtml(habit.relativePath)}" data-habit-date="${date}" aria-pressed="${done}" aria-label="${escapeHtml(habit.name)} · ${escapeHtml(date)} · ${done ? `Done, ${runLength}-day streak` : 'Not done'}" title="${escapeHtml(prettyDate(date, { weekday: 'long', month: 'long', day: 'numeric' }))} · ${done ? `${runLength} consecutive ${runLength === 1 ? 'day' : 'days'}` : 'Not done'}" ${future ? 'disabled' : ''}></button>`;
     }).join('');
-    return `<div class="habit-heatmap-row" style="grid-template-columns:${columns}"><span class="habit-row-name">${escapeHtml(habit.name)}</span><span></span>${cells}<span></span><span class="habit-stat-value ${currentStreak ? `tone-${palette[habitIndex % palette.length]}` : ''}">${currentStreak}</span><span class="habit-stat-value ${longestStreak > 0 && longestStreak === currentStreak ? `tone-${palette[habitIndex % palette.length]}` : ''}">${longestStreak}</span><span class="habit-stat-value plain">${dates.length}</span></div>`;
+    return `<div class="habit-heatmap-row" style="grid-template-columns:${columns}"><span class="habit-row-name"><input class="habit-color-input" type="color" value="${baseColor}" data-habit-color-file="${escapeHtml(habit.relativePath)}" aria-label="Choose color for ${escapeHtml(habit.name)}" title="Choose color"><span>${escapeHtml(habit.name)}</span></span>${cells}<span></span><span class="habit-stat-value ${currentStreak ? `tone-${palette[habitIndex % palette.length]}` : ''}">${currentStreak}</span><span class="habit-stat-value ${longestStreak > 0 && longestStreak === currentStreak ? `tone-${palette[habitIndex % palette.length]}` : ''}">${longestStreak}</span><span class="habit-stat-value plain">${dates.length}</span></div>`;
   }).join('');
-  const footer = `<div class="habit-heatmap-footer" style="grid-template-columns:${columns}"><button class="habit-add-inline" type="button" data-create-habit>＋ New Habit</button><span></span>${totals.map((total) => `<span>${total || ''}</span>`).join('')}<span></span><div class="habit-range-control"><input id="habit-window-size" type="range" min="7" max="31" value="${dayCount}" aria-label="Adjust visible date range"></div></div>`;
+  const footer = `<div class="habit-heatmap-footer" style="grid-template-columns:${columns}"><button class="habit-add-inline" type="button" data-create-habit>＋ New Habit</button>${totals.map((total) => `<span>${total || ''}</span>`).join('')}<span></span><div class="habit-range-control"><input id="habit-window-size" type="range" min="7" max="31" value="${dayCount}" aria-label="Adjust visible date range"></div></div>`;
   grid.innerHTML = monthHeader + rows + footer;
+}
+
+function renderWhoopDashboard() {
+  const dashboard = $('#whoop-dashboard');
+  if (!dashboard) return;
+  const data = state.whoopSummary;
+  if (state.whoopLoading) { dashboard.innerHTML = '<p class="whoop-empty">Loading WHOOP data…</p>'; return; }
+  if (!data?.connected) {
+    dashboard.innerHTML = `<div class="whoop-empty"><div class="empty-spark">☾</div><h2>Connect WHOOP</h2><p>${escapeHtml(state.whoopError || 'Connect your WHOOP account in Settings to see recovery and sleep here.')}</p><button class="button secondary" type="button" data-open-settings>Open Settings</button></div>`;
+    return;
+  }
+  const recovery = data.recovery?.score || {};
+  const sleepScore = data.sleep?.score || {};
+  const cycleScore = data.cycle?.score || {};
+  const metric = (label, value, note = '') => `<article class="whoop-metric"><span>${label}</span><strong>${value ?? '—'}</strong>${note ? `<small>${note}</small>` : ''}</article>`;
+  const hours = (ms) => Number.isFinite(Number(ms)) ? `${(Number(ms) / 3600000).toFixed(1)} hrs` : '—';
+  const weight = Number(data.body?.weight_kilogram);
+  const lastWorkout = data.workouts?.[0];
+  dashboard.innerHTML = `<div class="whoop-dashboard-head"><div><p class="eyebrow">LATEST FROM WHOOP</p><h2>${data.recovery?.score_state === 'SCORED' ? 'Today’s recovery' : 'Your recovery & sleep'}</h2><p>${data.refreshedAt ? `Updated ${escapeHtml(new Date(data.refreshedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }))}` : 'Metrics are provided by WHOOP.'}</p></div><span class="whoop-mark">W</span></div><div class="whoop-metrics">${metric('Recovery', recovery.recovery_score == null ? '—' : `${Math.round(recovery.recovery_score)}%`, recovery.recovery_score != null ? 'Readiness' : '')}${metric('Sleep performance', sleepScore.sleep_performance_percentage == null ? '—' : `${Math.round(sleepScore.sleep_performance_percentage)}%`)}${metric('Sleep duration', hours(sleepScore.total_in_bed_time_milli))}${metric('HRV', recovery.hrv_rmssd_milli == null ? '—' : `${Math.round(recovery.hrv_rmssd_milli)} ms`)}${metric('Resting heart rate', recovery.resting_heart_rate == null ? '—' : `${Math.round(recovery.resting_heart_rate)} bpm`)}${metric('Day strain', cycleScore.strain == null ? '—' : Number(cycleScore.strain).toFixed(1))}${metric('Weight', Number.isFinite(weight) ? `${(weight * 2.20462).toFixed(1)} lb` : '—')}${metric('Latest workout', lastWorkout?.sport_name || '—', lastWorkout?.start ? new Date(lastWorkout.start).toLocaleDateString() : '')}</div>${state.whoopError ? `<p class="whoop-error">${escapeHtml(state.whoopError)}</p>` : ''}`;
+}
+
+async function refreshWhoopSummary() {
+  state.whoopLoading = true;
+  state.whoopError = '';
+  renderWhoopDashboard();
+  try {
+    state.whoopSummary = await window.daybook.getWhoopSummary();
+    state.whoopError = '';
+  } catch (error) { state.whoopError = error.message; }
+  finally { state.whoopLoading = false; renderWhoopDashboard(); }
+}
+
+function weightInPounds(kilograms) { return (Number(kilograms) * 2.2046226218); }
+function renderWeightView() {
+  const readings = [...(state.weightReadings || [])].sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+  const dashboard = $('#weight-dashboard');
+  const list = $('#weight-history-list');
+  const ranges = { '7d': { label: 'Past 7 days', days: 7 }, '30d': { label: 'Past 30 days', days: 30 }, '90d': { label: 'Past quarter', days: 90 }, '1y': { label: 'Past year', days: 365 } };
+  if (!ranges[state.weightRange]) state.weightRange = '30d';
+  $('#weight-reading-count').textContent = `${readings.length} ${readings.length === 1 ? 'reading' : 'readings'}`;
+  if (!readings.length) {
+    dashboard.innerHTML = '<section class="panel weight-empty"><div class="empty-spark">⚖</div><h2>Your weight history starts here</h2><p>Export a weight report from Garmin Connect, then import the CSV to see your weigh-ins and trend in Daybook.</p><button class="button secondary" type="button" data-import-garmin-weight>Import Garmin CSV</button></section>';
+    list.innerHTML = '';
+    return;
+  }
+  const range = ranges[state.weightRange];
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - range.days);
+  const recent = readings.filter((item) => new Date(item.timestamp) >= cutoff).reverse();
+  const chartReadings = recent.length ? recent : [];
+  state.weightChartReadings = chartReadings;
+  const values = chartReadings.map((item) => weightInPounds(item.weightKg));
+  const min = values.length ? Math.min(...values) : 0, max = values.length ? Math.max(...values) : 0, span = Math.max(max - min, 1);
+  const width = 900, height = 230, padX = 24, padY = 22;
+  const points = values.map((value, index) => ({ x: padX + index * (width - padX * 2) / Math.max(values.length - 1, 1), y: height - padY - (value - min) * (height - padY * 2) / span }));
+  state.weightChartPoints = points;
+  const path = points.map((point, index) => `${index ? 'L' : 'M'}${point.x.toFixed(1)},${point.y.toFixed(1)}`).join(' ');
+  let trendPath = '';
+  if (points.length > 1) {
+    const meanX = points.reduce((sum, point) => sum + point.x, 0) / points.length;
+    const meanY = points.reduce((sum, point) => sum + point.y, 0) / points.length;
+    const slope = points.reduce((sum, point) => sum + (point.x - meanX) * (point.y - meanY), 0) /
+      (points.reduce((sum, point) => sum + (point.x - meanX) ** 2, 0) || 1);
+    const intercept = meanY - slope * meanX;
+    trendPath = `M${points[0].x.toFixed(1)},${(intercept + slope * points[0].x).toFixed(1)} L${points[points.length - 1].x.toFixed(1)},${(intercept + slope * points[points.length - 1].x).toFixed(1)}`;
+  }
+  const latestInRange = chartReadings[chartReadings.length - 1];
+  const comparison = chartReadings[0];
+  const startWeight = comparison ? weightInPounds(comparison.weightKg) : null;
+  const latestWeight = latestInRange ? weightInPounds(latestInRange.weightKg) : null;
+  const percentChange = startWeight && latestWeight !== null ? ((latestWeight - startWeight) / startWeight) * 100 : null;
+  const dateLabel = (timestamp, options = {}) => new Date(timestamp).toLocaleDateString(undefined, options);
+  const rangeTabs = Object.entries(ranges).map(([key, item]) => `<button type="button" class="weight-range-button ${state.weightRange === key ? 'active' : ''}" data-weight-range="${key}" aria-pressed="${state.weightRange === key}">${item.label}</button>`).join('');
+  const chartMarkup = chartReadings.length ? `<div class="weight-chart-wrap"><div class="weight-chart-axis"><span>${max.toFixed(1)} lb</span><span>${min.toFixed(1)} lb</span></div><svg class="weight-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="Weight readings and linear trend for the ${range.label.toLowerCase()}"><line x1="0" y1="${padY}" x2="0" y2="${height - padY}" class="weight-chart-hover-line"/><line x1="${padX}" y1="${padY}" x2="${width - padX}" y2="${padY}"/><line x1="${padX}" y1="${height / 2}" x2="${width - padX}" y2="${height / 2}"/><line x1="${padX}" y1="${height - padY}" x2="${width - padX}" y2="${height - padY}"/><path class="weight-chart-series" d="${path}"/><path class="weight-chart-trendline" d="${trendPath}"/>${points.length < 45 ? points.map((point) => `<circle cx="${point.x}" cy="${point.y}" r="3.5"/>`).join('') : ''}<circle class="weight-chart-hover-dot" cx="0" cy="0" r="5"/></svg><div class="weight-chart-tooltip hidden" role="status"></div></div><div class="weight-chart-dates"><span>${dateLabel(chartReadings[0].timestamp, { month: 'short', day: 'numeric' })}</span><span>${dateLabel(latestInRange.timestamp, { month: 'short', day: 'numeric' })}</span></div>${trendPath ? '<div class="weight-chart-legend"><span><i class="weight-legend-reading"></i>Readings</span><span><i class="weight-legend-trend"></i>Trend line</span></div>' : ''}` : '<div class="weight-chart-empty">No weight readings in this period.</div>';
+  dashboard.innerHTML = `<div class="weight-summary-grid"><article class="panel weight-stat"><span>Starting weight · ${range.label.toLowerCase()}</span><strong>${startWeight === null ? '—' : `${startWeight.toFixed(1)} <small>lb</small>`}</strong><p>${comparison ? dateLabel(comparison.timestamp, { month: 'long', day: 'numeric', year: 'numeric' }) : 'No readings in this period'}</p></article><article class="panel weight-stat"><span>Latest weight</span><strong>${latestWeight === null ? '—' : `${latestWeight.toFixed(1)} <small>lb</small>`}</strong><p>${latestInRange ? dateLabel(latestInRange.timestamp, { month: 'long', day: 'numeric', year: 'numeric' }) : 'No readings in this period'}</p></article><article class="panel weight-stat"><span>Change · ${range.label.toLowerCase()}</span><strong class="${percentChange == null ? '' : percentChange < 0 ? 'weight-down' : percentChange > 0 ? 'weight-up' : ''}">${percentChange === null ? '—' : `${percentChange > 0 ? '+' : ''}${percentChange.toFixed(1)}%`}</strong><p>${chartReadings.length > 1 ? `${dateLabel(comparison.timestamp, { month: 'short', day: 'numeric' })} to ${dateLabel(latestInRange.timestamp, { month: 'short', day: 'numeric' })}` : 'Need at least two readings in this period'}</p></article></div><section class="panel weight-chart-panel"><div class="workout-panel-heading weight-chart-heading"><div><h2>Weight trend</h2><p>${chartReadings.length} weigh-ins · ${range.label.toLowerCase()}</p></div><div class="weight-range-control" role="group" aria-label="Weight chart time range">${rangeTabs}</div></div>${chartMarkup}</section>`;
+  list.innerHTML = readings.slice(0, 60).map((entry) => `<article class="weight-history-row"><strong>${weightInPounds(entry.weightKg).toFixed(1)} lb</strong><span>${dateLabel(entry.timestamp, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}</span><span>${entry.bodyFatPercent == null ? '—' : `${entry.bodyFatPercent}% body fat`}</span><span>${entry.bmi == null ? '—' : `BMI ${entry.bmi}`}</span><small>${escapeHtml(entry.source || 'Garmin Connect')}</small></article>`).join('');
+}
+
+async function loadWeightReadings() {
+  const [weightReadings, dexaScans] = await Promise.all([window.daybook.listWeightReadings(), window.daybook.listDexaScans()]);
+  state.weightReadings = weightReadings;
+  state.dexaScans = dexaScans;
+  renderWeightView();
+  renderDexaScans();
+}
+
+function renderDexaScans() {
+  const scans = state.dexaScans || [];
+  $('#dexa-scan-count').textContent = `${scans.length} ${scans.length === 1 ? 'scan' : 'scans'}`;
+  $('#dexa-scan-empty').classList.toggle('hidden', scans.length > 0);
+  $('#dexa-scan-list').innerHTML = scans.map((scan) => {
+    const date = new Date(`${scan.date}T12:00:00`).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+    const measures = [
+      ['Body fat', scan.bodyFatPercent == null ? null : `${scan.bodyFatPercent}%`], ['Fat mass', scan.fatMassLb == null ? null : `${scan.fatMassLb} lb`],
+      ['Lean mass', scan.leanMassLb == null ? null : `${scan.leanMassLb} lb`], ['Bone mineral', scan.boneMineralContentLb == null ? null : `${scan.boneMineralContentLb} lb`],
+      ['Visceral fat', scan.visceralFatG == null ? null : `${scan.visceralFatG} g`], ['A/G ratio', scan.androidGynoidRatio], ['BMD', scan.boneMineralDensity == null ? null : `${scan.boneMineralDensity} g/cm²`]
+    ].filter(([, value]) => value !== null && value !== undefined && value !== '');
+    return `<article class="dexa-scan-card"><header><div><p class="eyebrow">DEXA SCAN</p><h3>${escapeHtml(date)}</h3></div><button class="text-button" type="button" data-open-dexa-note="${escapeHtml(scan.relativePath)}">Open note ↗</button></header><div class="dexa-measures">${measures.length ? measures.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(String(value))}</strong></div>`).join('') : '<span class="field-note">No measurements were entered.</span>'}</div>${scan.reportPath ? `<p class="dexa-report-link">Report attached: ${escapeHtml(scan.reportPath.split('/').pop())}</p>` : ''}${scan.notes ? `<p class="dexa-notes">${escapeHtml(scan.notes)}</p>` : ''}</article>`;
+  }).join('');
+}
+
+function openDexaModal() {
+  $('#dexa-form').reset();
+  $('#dexa-date').value = localDateString(new Date());
+  $('#dexa-status').textContent = '';
+  $('#dexa-report-name').textContent = 'No report attached';
+  $('#dexa-clear-report').classList.add('hidden');
+  state.dexaDraftReport = null;
+  $('#dexa-modal').classList.remove('hidden');
+  $('#dexa-date').focus();
+}
+
+async function importGarminWeightCsv() {
+  try {
+    const result = await window.daybook.importGarminWeightCsv();
+    if (result.canceled) return;
+    state.weightReadings = result.readings || [];
+    renderWeightView();
+    const status = $('#weight-import-status');
+    status.textContent = `Imported ${result.imported} weigh-ins from Garmin Connect. Readings are saved in your vault’s SYSTEM/DAYBOOK folder.`;
+    status.classList.remove('hidden');
+    showToast(`Imported ${result.imported} Garmin weight readings.`);
+  } catch (error) { showToast(error.message, true); }
+}
+
+function habitCommitmentRange(period, monthValue) {
+  const [year, month] = String(monthValue || '').split('-').map(Number);
+  if (!year || !month) return null;
+  const start = new Date(year, month - 1, 1);
+  const monthLength = period === 'quarter' ? 3 : 1;
+  const end = new Date(year, month - 1 + monthLength, 0);
+  const label = period === 'quarter'
+    ? `${start.toLocaleDateString(undefined, { month: 'short', year: 'numeric' })} – ${end.toLocaleDateString(undefined, { month: 'short', year: 'numeric' })}`
+    : start.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+  return { startDate: localDateString(start), endDate: localDateString(end), name: label };
+}
+
+function updateHabitCommitmentPreview() {
+  const range = habitCommitmentRange($('#habit-commitment-period').value, $('#habit-commitment-month').value);
+  $('#habit-commitment-preview').textContent = range
+    ? `${range.name} · ${prettyDate(range.startDate, { month: 'short', day: 'numeric', year: 'numeric' })} through ${prettyDate(range.endDate, { month: 'short', day: 'numeric', year: 'numeric' })}`
+    : 'Choose a starting month.';
+}
+
+function openHabitCommitmentModal() {
+  const today = localDateString(new Date());
+  const active = (state.habitCommitments || []).find((item) => item.startDate <= today && item.endDate >= today);
+  let defaultMonth = today.slice(0, 7);
+  if (active) {
+    const nextMonth = new Date(`${active.endDate}T12:00:00`);
+    nextMonth.setDate(1);
+    nextMonth.setMonth(nextMonth.getMonth() + 1);
+    defaultMonth = localDateString(nextMonth).slice(0, 7);
+  }
+  $('#habit-commitment-form').reset();
+  $('#habit-commitment-period').value = 'month';
+  $('#habit-commitment-month').value = defaultMonth;
+  $('#habit-commitment-status').textContent = '';
+  const fallbackColors = ['#35ce2b', '#27aaf1', '#ffdc39', '#ff712d'];
+  $('#habit-commitment-habit-list').innerHTML = state.habits.length
+    ? state.habits.map((habit, index) => `<label class="habit-commitment-choice"><input type="checkbox" data-habit-commitment-file="${escapeHtml(habit.relativePath)}" checked><i style="--habit-choice-color:${habit.color || fallbackColors[index % fallbackColors.length]}"></i><span><strong>${escapeHtml(habit.name)}</strong><small>${escapeHtml(frequencyLabel(habit.frequency || 'daily'))}</small></span></label>`).join('')
+    : '<p class="habit-commitment-empty">Create a habit first, then include it in a period.</p>';
+  updateHabitCommitmentPreview();
+  $('#habit-commitment-modal').classList.remove('hidden');
 }
 
 function habitWeekStart(value) {
@@ -1479,10 +1803,11 @@ function renderWorkoutDashboard() {
 function setActiveView(view) {
   const modules = state.config?.modules || {};
   if (view === 'week' && !state.config?.vaultPath) view = 'today';
-  if ((view === 'habits' && modules.habits === false) || (view === 'protocols' && modules.wellness === false) || (view === 'workouts' && modules.hevy === false)) view = 'today';
+  if (view === 'weight' && !state.config?.vaultPath) view = 'today';
+  if ((view === 'habits' && modules.habits === false) || (view === 'protocols' && modules.wellness === false) || (view === 'workouts' && modules.hevy === false) || (view === 'sleep' && modules.whoop === false)) view = 'today';
   state.activeView = view;
   applyModuleVisibility();
-  const labels = { today: 'TODAY', week: 'WEEK', journal: 'JOURNAL', meetings: 'MEETINGS', people: 'PEOPLE', projects: 'PROJECTS', work: 'TASKS', habits: 'HABITS', protocols: 'PROTOCOLS', workouts: 'WORKOUTS' };
+  const labels = { today: 'TODAY', week: 'WEEK', journal: 'JOURNAL', meetings: 'MEETINGS', people: 'PEOPLE', projects: 'PROJECTS', work: 'TASKS', habits: 'HABITS', protocols: 'PROTOCOLS', workouts: 'WORKOUTS', sleep: 'SLEEP', weight: 'WEIGHT' };
   $('#workspace-crumb').textContent = labels[view] || 'DAYBOOK';
   $('#setup-view').classList.toggle('hidden', Boolean(state.config.vaultPath) || view !== 'today');
   $('#today-view').classList.toggle('hidden', !state.config.vaultPath || view !== 'today');
@@ -1495,6 +1820,8 @@ function setActiveView(view) {
   $('#habits-tracker-view').classList.toggle('hidden', view !== 'habits');
   $('#habits-view').classList.toggle('hidden', view !== 'protocols');
   $('#workouts-view').classList.toggle('hidden', view !== 'workouts');
+  $('#sleep-view').classList.toggle('hidden', view !== 'sleep');
+  $('#weight-view').classList.toggle('hidden', view !== 'weight');
   $$('.nav-item').forEach((button) => button.classList.toggle('active', button.dataset.view === view));
   $('#open-note').title = view === 'journal' ? 'Open this journal day in Obsidian' : 'Open today’s note in Obsidian';
   $('#open-note').setAttribute('aria-label', $('#open-note').title);
@@ -1517,6 +1844,8 @@ function setActiveView(view) {
       });
     } else renderWorkoutDashboard();
   }
+  if (view === 'sleep') refreshWhoopSummary();
+  if (view === 'weight') loadWeightReadings().catch((error) => showToast(error.message, true));
 }
 
 async function loadPeople() {
@@ -1680,9 +2009,11 @@ function applyModuleVisibility() {
   const habitsNav = $('.nav-item[data-view="habits"]');
   const protocolsNav = $('.nav-item[data-view="protocols"]');
   const workoutsNav = $('.nav-item[data-view="workouts"]');
+  const sleepNav = $('.nav-item[data-view="sleep"]');
   if (habitsNav) habitsNav.classList.toggle('hidden', !habitsEnabled);
   if (protocolsNav) protocolsNav.classList.toggle('hidden', !wellnessEnabled);
   if (workoutsNav) workoutsNav.classList.toggle('hidden', !hevyEnabled);
+  if (sleepNav) sleepNav.classList.toggle('hidden', modules.whoop === false);
   $('#wellness-module-content').classList.toggle('hidden', !wellnessEnabled);
   $('#habits-tracker-view').classList.toggle('hidden', !habitsEnabled || state.activeView !== 'habits');
   $('#build-protocol').classList.toggle('hidden', !wellnessEnabled);
@@ -1696,6 +2027,7 @@ function applyModuleVisibility() {
   if (!habitsEnabled && state.activeView === 'habits') setActiveView('today');
   if (!wellnessEnabled && state.activeView === 'protocols') setActiveView('today');
   if (!hevyEnabled && state.activeView === 'workouts') setActiveView('today');
+  if (modules.whoop === false && state.activeView === 'sleep') setActiveView('today');
 }
 
 function renderMeetingNotes() {
@@ -2460,17 +2792,19 @@ async function requestCalendarAccess() {
 
 async function refreshHabits() {
   const modules = state.config?.modules || {};
-  const [habits, protocolItems, protocolBundles, committedProtocol, protocolCycles] = await Promise.all([
+  const [habits, protocolItems, protocolBundles, committedProtocol, protocolCycles, habitCommitments] = await Promise.all([
     modules.habits === false ? Promise.resolve([]) : window.daybook.listHabits(),
     modules.wellness === false ? Promise.resolve([]) : window.daybook.listProtocol(state.date),
     modules.wellness === false ? Promise.resolve([]) : window.daybook.listProtocolBundles(),
     modules.wellness === false ? Promise.resolve({ relativePaths: [] }) : window.daybook.listCommittedProtocol(state.date),
-    modules.wellness === false ? Promise.resolve([]) : window.daybook.listProtocolCycles()
+    modules.wellness === false ? Promise.resolve([]) : window.daybook.listProtocolCycles(),
+    modules.habits === false ? Promise.resolve([]) : window.daybook.listHabitCommitments()
   ]);
   state.habits = habits;
   state.protocolItems = protocolItems;
   state.protocolBundles = protocolBundles;
   state.protocolCycles = protocolCycles;
+  state.habitCommitments = habitCommitments;
   state.committedProtocolPaths = committedProtocol.relativePaths || [];
   state.committedProtocolName = committedProtocol.name || '';
   state.committedProtocolTime = committedProtocol.time || '';
@@ -2604,6 +2938,10 @@ async function openSettings() {
   $('#people-folder-setting').value = state.config.peopleFolder || 'People';
   $('#todoist-token').value = state.config.todoistToken || '';
   $('#hevy-api-key').value = state.config.hevyApiKey || '';
+  $('#whoop-client-id').value = state.config.whoopClientId || '';
+  $('#whoop-client-secret').value = '';
+  $('#whoop-client-secret').placeholder = state.config.whoopConnected ? 'Saved securely on this Mac' : 'Client Secret';
+  $('#whoop-connection-status').textContent = state.config.whoopConnected ? 'Connected to WHOOP on this Mac' : 'Not connected';
   $('#wrike-host').value = state.config.wrikeHost || 'https://www.wrike.com';
   $('#wrike-token').value = state.config.wrikeToken || '';
   $('#servicenow-instance').value = state.config.serviceNowInstance || '';
@@ -2619,6 +2957,7 @@ async function openSettings() {
   $('#module-wrike').checked = modules.wrike !== false;
   $('#module-serviceNow').checked = modules.serviceNow !== false;
   $('#module-hevy').checked = modules.hevy !== false;
+  $('#module-whoop').checked = modules.whoop !== false;
   $('#appearance-mode').value = state.config.appearance?.mode || 'system';
   $('#appearance-color').value = state.config.appearance?.color || 'blue';
   $('#settings-status').textContent = '';
@@ -2659,7 +2998,7 @@ function updateVaultLabel() {
 
 async function init() {
   state.config = await window.daybook.getConfig();
-  state.config.modules ||= { habits: true, wellness: true, todoist: true, hevy: true, wrike: true, serviceNow: true };
+  state.config.modules ||= { habits: true, wellness: true, todoist: true, hevy: true, wrike: true, serviceNow: true, whoop: true };
   state.config.appearance ||= { mode: 'system', color: 'blue' };
   applyAppearance();
   window.matchMedia?.('(prefers-color-scheme: dark)').addEventListener('change', () => {
@@ -2687,11 +3026,36 @@ async function init() {
   $('#week-current').addEventListener('click', () => { state.weekStart = weekStartFor(localDateString(new Date())); state.weekData = []; loadWeek(); });
   const openHabitCreate = () => {
     $('#habit-create-form').reset();
+    $('#habit-create-color').value = '#35ce2b';
     $('#habit-create-status').textContent = '';
     $('#habit-create-modal').classList.remove('hidden');
     $('#habit-create-name').focus();
   };
   $('#habit-tracker-empty').addEventListener('click', (event) => { if (event.target.closest('[data-create-habit]')) openHabitCreate(); });
+  $('#habit-dashboard').addEventListener('click', (event) => {
+    if (event.target.closest('[data-create-habit-commitment]')) openHabitCommitmentModal();
+  });
+  $('#habit-commitment-period').addEventListener('change', updateHabitCommitmentPreview);
+  $('#habit-commitment-month').addEventListener('change', updateHabitCommitmentPreview);
+  $('#habit-commitment-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const button = event.currentTarget.querySelector('[type="submit"]');
+    const status = $('#habit-commitment-status');
+    const period = $('#habit-commitment-period').value;
+    const range = habitCommitmentRange(period, $('#habit-commitment-month').value);
+    const selected = $$('[data-habit-commitment-file]').filter((input) => input.checked).map((input) => ({ relativePath: input.dataset.habitCommitmentFile }));
+    if (!range) { status.textContent = 'Choose a starting month.'; return; }
+    button.disabled = true;
+    status.textContent = 'Saving commitment…';
+    try {
+      state.habitCommitments = await window.daybook.saveHabitCommitment({ period, ...range, habits: selected });
+      $('#habit-commitment-modal').classList.add('hidden');
+      renderHabitTracker();
+      showToast('Habit commitment saved. Your measurement set is now fixed for this period.');
+    } catch (error) {
+      status.textContent = error.message;
+    } finally { button.disabled = false; }
+  });
   $('#habit-heatmap').addEventListener('click', async (event) => {
     if (event.target.closest('[data-create-habit]')) { openHabitCreate(); return; }
     const rangeButton = event.target.closest('[data-habit-range]');
@@ -2714,7 +3078,20 @@ async function init() {
       cell.disabled = false;
     }
   });
-  $('#habit-heatmap').addEventListener('change', (event) => {
+  $('#habit-heatmap').addEventListener('change', async (event) => {
+    const colorInput = event.target.closest('[data-habit-color-file]');
+    if (colorInput) {
+      const habit = state.habits.find((item) => item.relativePath === colorInput.dataset.habitColorFile);
+      try {
+        const result = await window.daybook.setHabitColor(colorInput.dataset.habitColorFile, colorInput.value);
+        if (habit) habit.color = result.color;
+        renderHabitTracker();
+      } catch (error) {
+        showToast(error.message, true);
+        renderHabitTracker();
+      }
+      return;
+    }
     if (event.target.id !== 'habit-window-size') return;
     const oldEnd = new Date(state.habitCalendarStart.getFullYear(), state.habitCalendarStart.getMonth(), state.habitCalendarStart.getDate() + state.habitCalendarDays - 1);
     state.habitCalendarDays = Number(event.target.value);
@@ -2727,7 +3104,7 @@ async function init() {
     save.disabled = true;
     $('#habit-create-status').textContent = 'Creating…';
     try {
-      const result = await window.daybook.createHabit($('#habit-create-name').value.trim(), $('#habit-create-frequency').value);
+      const result = await window.daybook.createHabit($('#habit-create-name').value.trim(), $('#habit-create-frequency').value, $('#habit-create-color').value);
       $('#habit-create-modal').classList.add('hidden');
       await loadHabits();
       showToast(`${result.name} added to Habits.`);
@@ -2988,6 +3365,93 @@ async function init() {
     }
   });
   $('#settings-open').addEventListener('click', openSettings);
+  $('#whoop-dashboard').addEventListener('click', (event) => { if (event.target.closest('[data-open-settings]')) openSettings(); });
+  $('#whoop-refresh').addEventListener('click', async () => { $('#whoop-refresh').disabled = true; await refreshWhoopSummary(); $('#whoop-refresh').disabled = false; });
+  $('#weight-import-garmin').addEventListener('click', importGarminWeightCsv);
+  $('#weight-dashboard').addEventListener('click', (event) => {
+    if (event.target.closest('[data-import-garmin-weight]')) importGarminWeightCsv();
+    const rangeButton = event.target.closest('[data-weight-range]');
+    if (rangeButton && state.weightRange !== rangeButton.dataset.weightRange) {
+      state.weightRange = rangeButton.dataset.weightRange;
+      renderWeightView();
+    }
+  });
+  $('#weight-dashboard').addEventListener('pointermove', (event) => {
+    const svg = event.target.closest('.weight-chart');
+    if (!svg || state.weightChartReadings.length < 2) return;
+    const bounds = svg.getBoundingClientRect();
+    const localX = (event.clientX - bounds.left) / bounds.width * 900;
+    const index = Math.max(0, Math.min(state.weightChartPoints.length - 1, Math.round((localX - 24) / (900 - 48) * (state.weightChartPoints.length - 1))));
+    const point = state.weightChartPoints[index];
+    const reading = state.weightChartReadings[index];
+    const guide = svg.querySelector('.weight-chart-hover-line');
+    const dot = svg.querySelector('.weight-chart-hover-dot');
+    const tooltip = svg.parentElement.querySelector('.weight-chart-tooltip');
+    guide.setAttribute('x1', point.x);
+    guide.setAttribute('x2', point.x);
+    guide.classList.add('is-visible');
+    dot.setAttribute('cx', point.x);
+    dot.setAttribute('cy', point.y);
+    dot.classList.add('is-visible');
+    const dateText = new Date(reading.timestamp).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
+    tooltip.innerHTML = `<strong>${weightInPounds(reading.weightKg).toFixed(1)} lb</strong><span>${escapeHtml(dateText)}</span>${reading.bodyFatPercent == null ? '' : `<span>${escapeHtml(String(reading.bodyFatPercent))}% body fat</span>`}`;
+    tooltip.classList.remove('hidden');
+    const wrap = svg.parentElement;
+    const wrapBounds = wrap.getBoundingClientRect();
+    const left = Math.max(8, Math.min(wrapBounds.width - tooltip.offsetWidth - 8, event.clientX - wrapBounds.left + 12));
+    tooltip.style.left = `${left}px`;
+  });
+  $('#weight-dashboard').addEventListener('pointerout', (event) => {
+    if (!event.target.closest('.weight-chart') || event.relatedTarget?.closest?.('.weight-chart')) return;
+    const wrap = event.target.closest('.weight-chart-wrap');
+    wrap?.querySelector('.weight-chart-tooltip')?.classList.add('hidden');
+    wrap?.querySelector('.weight-chart-hover-line')?.classList.remove('is-visible');
+    wrap?.querySelector('.weight-chart-hover-dot')?.classList.remove('is-visible');
+  });
+  $('#dexa-add').addEventListener('click', openDexaModal);
+  $('#dexa-attach-report').addEventListener('click', async () => {
+    try {
+      const date = $('#dexa-date').value || localDateString(new Date());
+      const report = await window.daybook.chooseDexaReport(date);
+      if (report.canceled) return;
+      state.dexaDraftReport = report.relativePath;
+      $('#dexa-report-name').textContent = report.filename;
+      $('#dexa-clear-report').classList.remove('hidden');
+    } catch (error) { $('#dexa-status').textContent = error.message; }
+  });
+  $('#dexa-clear-report').addEventListener('click', () => {
+    state.dexaDraftReport = null;
+    $('#dexa-report-name').textContent = 'No report attached';
+    $('#dexa-clear-report').classList.add('hidden');
+  });
+  $('#dexa-scan-list').addEventListener('click', async (event) => {
+    const button = event.target.closest('[data-open-dexa-note]');
+    if (button) await window.daybook.openNote(button.dataset.openDexaNote);
+  });
+  $('#dexa-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const button = $('#dexa-form button[type="submit"]');
+    button.disabled = true;
+    $('#dexa-status').textContent = 'Saving scan to Obsidian…';
+    try {
+      await window.daybook.saveDexaScan({
+        date: $('#dexa-date').value,
+        bodyFatPercent: $('#dexa-body-fat').value,
+        fatMassLb: $('#dexa-fat-mass').value,
+        leanMassLb: $('#dexa-lean-mass').value,
+        boneMineralContentLb: $('#dexa-bone-content').value,
+        visceralFatG: $('#dexa-visceral-fat').value,
+        androidGynoidRatio: $('#dexa-ag-ratio').value,
+        boneMineralDensity: $('#dexa-bmd').value,
+        notes: $('#dexa-notes').value,
+        reportPath: state.dexaDraftReport || ''
+      });
+      $('#dexa-modal').classList.add('hidden');
+      await loadWeightReadings();
+      showToast('DEXA scan saved to your Wellness folder.');
+    } catch (error) { $('#dexa-status').textContent = error.message; }
+    finally { button.disabled = false; }
+  });
   $('#meetings-refresh').addEventListener('click', async () => {
     await loadMeetingNotes();
     await refreshMeetingCalendarEvents(state.meetingMonth, true);
@@ -3856,6 +4320,22 @@ async function init() {
     } catch (error) { showToast(error.message, true); }
   });
   $('#servicenow-auth-type').addEventListener('change', updateServiceNowAuthFields);
+  $('#whoop-connect').addEventListener('click', async () => {
+    const button = $('#whoop-connect');
+    const status = $('#whoop-connection-status');
+    try {
+      state.config = await window.daybook.saveConfig({ whoopClientId: $('#whoop-client-id').value.trim(), whoopClientSecret: $('#whoop-client-secret').value.trim() });
+      button.disabled = true;
+      button.textContent = 'Waiting for WHOOP…';
+      status.textContent = 'Finish authorization in your browser.';
+      const result = await window.daybook.connectWhoop();
+      state.config = result.config;
+      status.textContent = 'Connected to WHOOP on this Mac';
+      await refreshWhoopSummary();
+      showToast('WHOOP connected. Recovery and sleep data are ready.');
+    } catch (error) { status.textContent = error.message; }
+    finally { button.disabled = false; button.textContent = 'Connect WHOOP'; }
+  });
   $('#save-settings').addEventListener('click', async () => {
     try {
       state.config = await window.daybook.saveConfig({
@@ -3875,13 +4355,16 @@ async function init() {
         serviceNowAuthType: $('#servicenow-auth-type').value,
         serviceNowToken: $('#servicenow-token').value.trim(),
         serviceNowPassword: $('#servicenow-password').value,
+        whoopClientId: $('#whoop-client-id').value.trim(),
+        whoopClientSecret: $('#whoop-client-secret').value.trim(),
         modules: {
           habits: $('#module-habits').checked,
           wellness: $('#module-wellness').checked,
           todoist: $('#module-todoist').checked,
           wrike: $('#module-wrike').checked,
           serviceNow: $('#module-serviceNow').checked,
-          hevy: $('#module-hevy').checked
+          hevy: $('#module-hevy').checked,
+          whoop: $('#module-whoop').checked
         },
         appearance: {
           mode: $('#appearance-mode').value,
