@@ -34,6 +34,7 @@ const state = {
   habitCommitments: [],
   habitCalendarStart: new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate() - 14),
   habitCalendarDays: 15,
+  editingHabitPath: '',
   protocolItems: [],
   committedProtocolPaths: [],
   committedProtocolTimings: {},
@@ -1197,7 +1198,7 @@ function renderHabitTracker() {
       const colorStyle = done ? ` style="background-color:${darkenHabitColor(baseColor, darkness)}"` : '';
       return `<button type="button" class="habit-heat-cell tone-${palette[habitIndex % palette.length]} ${done ? 'is-complete' : ''} ${date === today ? 'is-today' : ''}"${colorStyle} data-habit-file="${escapeHtml(habit.relativePath)}" data-habit-date="${date}" aria-pressed="${done}" aria-label="${escapeHtml(habit.name)} · ${escapeHtml(date)} · ${done ? `Done, ${runLength}-day streak` : 'Not done'}" title="${escapeHtml(prettyDate(date, { weekday: 'long', month: 'long', day: 'numeric' }))} · ${done ? `${runLength} consecutive ${runLength === 1 ? 'day' : 'days'}` : 'Not done'}" ${future ? 'disabled' : ''}></button>`;
     }).join('');
-    return `<div class="habit-heatmap-row" style="grid-template-columns:${columns}"><span class="habit-row-name"><input class="habit-color-input" type="color" value="${baseColor}" data-habit-color-file="${escapeHtml(habit.relativePath)}" aria-label="Choose color for ${escapeHtml(habit.name)}" title="Choose color"><span>${escapeHtml(habit.name)}</span></span>${cells}<span></span><span class="habit-stat-value ${currentStreak ? `tone-${palette[habitIndex % palette.length]}` : ''}">${currentStreak}</span><span class="habit-stat-value ${longestStreak > 0 && longestStreak === currentStreak ? `tone-${palette[habitIndex % palette.length]}` : ''}">${longestStreak}</span><span class="habit-stat-value plain">${dates.length}</span></div>`;
+    return `<div class="habit-heatmap-row" style="grid-template-columns:${columns}"><span class="habit-row-name"><input class="habit-color-input" type="color" value="${baseColor}" data-habit-color-file="${escapeHtml(habit.relativePath)}" aria-label="Choose color for ${escapeHtml(habit.name)}" title="Choose color"><button type="button" data-edit-habit="${escapeHtml(habit.relativePath)}" title="Edit ${escapeHtml(habit.name)}">${escapeHtml(habit.name)}</button></span>${cells}<span></span><span class="habit-stat-value ${currentStreak ? `tone-${palette[habitIndex % palette.length]}` : ''}">${currentStreak}</span><span class="habit-stat-value ${longestStreak > 0 && longestStreak === currentStreak ? `tone-${palette[habitIndex % palette.length]}` : ''}">${longestStreak}</span><span class="habit-stat-value plain">${dates.length}</span></div>`;
   }).join('');
   const footer = `<div class="habit-heatmap-footer" style="grid-template-columns:${columns}"><button class="habit-add-inline" type="button" data-create-habit>＋ New Habit</button>${totals.map((total) => `<span>${total || ''}</span>`).join('')}<span></span><div class="habit-range-control"><input id="habit-window-size" type="range" min="7" max="31" value="${dayCount}" aria-label="Adjust visible date range"></div></div>`;
   grid.innerHTML = monthHeader + rows + footer;
@@ -1320,7 +1321,7 @@ async function importGarminWeightCsv() {
     state.weightReadings = result.readings || [];
     renderWeightView();
     const status = $('#weight-import-status');
-    status.textContent = `Imported ${result.imported} weigh-ins from Garmin Connect. Readings are saved in your vault’s SYSTEM/DAYBOOK folder.`;
+    status.textContent = `Imported ${result.imported} weigh-ins from Garmin Connect. Readings are saved in your vault’s .daybook folder.`;
     status.classList.remove('hidden');
     showToast(`Imported ${result.imported} Garmin weight readings.`);
   } catch (error) { showToast(error.message, true); }
@@ -3025,8 +3026,11 @@ async function init() {
   $('#week-next').addEventListener('click', () => { state.weekStart = shiftDate(state.weekStart, 7); state.weekData = []; loadWeek(); });
   $('#week-current').addEventListener('click', () => { state.weekStart = weekStartFor(localDateString(new Date())); state.weekData = []; loadWeek(); });
   const openHabitCreate = () => {
+    state.editingHabitPath = '';
     $('#habit-create-form').reset();
     $('#habit-create-color').value = '#35ce2b';
+    $('#habit-create-title').textContent = 'Create a habit';
+    $('#habit-create-form [type="submit"]').textContent = 'Create habit';
     $('#habit-create-status').textContent = '';
     $('#habit-create-modal').classList.remove('hidden');
     $('#habit-create-name').focus();
@@ -3058,6 +3062,21 @@ async function init() {
   });
   $('#habit-heatmap').addEventListener('click', async (event) => {
     if (event.target.closest('[data-create-habit]')) { openHabitCreate(); return; }
+    const editButton = event.target.closest('[data-edit-habit]');
+    if (editButton) {
+      const habit = state.habits.find((item) => item.relativePath === editButton.dataset.editHabit);
+      if (!habit) return;
+      state.editingHabitPath = habit.relativePath;
+      $('#habit-create-name').value = habit.name;
+      $('#habit-create-frequency').value = habit.frequency || 'daily';
+      $('#habit-create-color').value = habit.color || '#35ce2b';
+      $('#habit-create-title').textContent = 'Edit habit';
+      $('#habit-create-form [type="submit"]').textContent = 'Save changes';
+      $('#habit-create-status').textContent = '';
+      $('#habit-create-modal').classList.remove('hidden');
+      $('#habit-create-name').focus();
+      return;
+    }
     const rangeButton = event.target.closest('[data-habit-range]');
     if (rangeButton && !rangeButton.disabled) {
       state.habitCalendarStart.setDate(state.habitCalendarStart.getDate() + (rangeButton.dataset.habitRange === 'previous' ? -state.habitCalendarDays : state.habitCalendarDays));
@@ -3102,12 +3121,16 @@ async function init() {
     event.preventDefault();
     const save = event.currentTarget.querySelector('[type="submit"]');
     save.disabled = true;
-    $('#habit-create-status').textContent = 'Creating…';
+    $('#habit-create-status').textContent = state.editingHabitPath ? 'Saving…' : 'Creating…';
     try {
-      const result = await window.daybook.createHabit($('#habit-create-name').value.trim(), $('#habit-create-frequency').value, $('#habit-create-color').value);
+      const values = { name: $('#habit-create-name').value.trim(), frequency: $('#habit-create-frequency').value, color: $('#habit-create-color').value };
+      const result = state.editingHabitPath
+        ? await window.daybook.updateHabit(state.editingHabitPath, values)
+        : await window.daybook.createHabit(values.name, values.frequency, values.color);
       $('#habit-create-modal').classList.add('hidden');
       await loadHabits();
-      showToast(`${result.name} added to Habits.`);
+      showToast(state.editingHabitPath ? `${result.name} updated.` : `${result.name} added to Habits.`);
+      state.editingHabitPath = '';
     } catch (error) {
       $('#habit-create-status').textContent = error.message;
     } finally { save.disabled = false; }

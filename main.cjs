@@ -63,25 +63,29 @@ function userConfigPath() {
 }
 
 function daybookDataFolder(vaultPath) {
-  return path.join(vaultPath, 'SYSTEM', 'DAYBOOK');
+  return path.join(vaultPath, '.daybook');
 }
 
 async function migrateLegacyDaybookData(vaultPath) {
   if (!vaultPath) return;
   const currentFolder = daybookDataFolder(vaultPath);
   await fs.mkdir(currentFolder, { recursive: true });
-  const legacyFolders = [
-    path.join(vaultPath, 'Daybook'),
-    path.join(vaultPath, '.daybook')
-  ];
-  for (const name of ['protocol-bundles.json', 'protocol-cycles.json', 'settings.json', 'hevy-workouts-cache.json', 'weight-readings.json']) {
+  const legacyFolders = [path.join(vaultPath, 'SYSTEM', 'DAYBOOK'), path.join(vaultPath, 'Daybook')];
+  for (const name of ['protocol-bundles.json', 'protocol-cycles.json', 'habit-commitments.json', 'settings.json', 'hevy-workouts-cache.json', 'weight-readings.json']) {
     const destination = path.join(currentFolder, name);
     for (const legacyFolder of legacyFolders) {
+      const source = path.join(legacyFolder, name);
       try {
-        await fs.copyFile(path.join(legacyFolder, name), destination, fsConstants.COPYFILE_EXCL);
-        break;
+        const [sourceStat, destinationStat] = await Promise.all([
+          fs.stat(source),
+          fs.stat(destination).catch((error) => error.code === 'ENOENT' ? null : Promise.reject(error))
+        ]);
+        if (!destinationStat) await fs.copyFile(source, destination, fsConstants.COPYFILE_EXCL);
+        else if (sourceStat.mtimeMs > destinationStat.mtimeMs) {
+          await fs.copyFile(destination, `${destination}.pre-restore.bak`, fsConstants.COPYFILE_EXCL).catch((error) => { if (error.code !== 'EEXIST') throw error; });
+          await fs.copyFile(source, destination);
+        }
       } catch (error) {
-        if (error.code === 'EEXIST') break;
         if (error.code !== 'ENOENT') throw error;
       }
     }
@@ -793,7 +797,12 @@ function updateDayBlock(content, day) {
 function parseHabit(filePath, content, root) {
   const frontmatter = content.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
   if (!frontmatter || !isHabitFrontmatter(frontmatter[1])) return null;
-  const name = path.basename(filePath, path.extname(filePath));
+  const fallbackName = path.basename(filePath, path.extname(filePath));
+  const rawName = frontmatter[1].match(/^name:\s*(.*?)\s*$/m)?.[1]?.trim();
+  let name = rawName || fallbackName;
+  if (rawName?.startsWith('"')) {
+    try { name = JSON.parse(rawName); } catch { name = rawName.replace(/^"|"$/g, ''); }
+  } else if (rawName?.startsWith("'")) name = rawName.replace(/^'|'$/g, '').replace(/''/g, "'");
   const completedMatch = frontmatter[1].match(/^completed:[ \t]*(?:\r?\n((?:[ \t]+-\s*.*(?:\r?\n|$))*))?/m);
   const inlineCompleted = frontmatter[1].match(/^completed:\s*\[([^\]]*)\]\s*$/m)?.[1];
   const completed = inlineCompleted?.trim()
@@ -1957,7 +1966,7 @@ async function handleCreateObsidianTaskFromJournal(date, text, tags = [], dueDat
 }
 
 function formatHabitFrontmatter(name, frequency, color) {
-  return `---\ntype: habit\nhabit: true\nfrequency: ${frequency || 'daily'}\ncolor: ${color}\ncompleted: []\n---\n\n# ${name}\n\nA small practice, repeated with care.\n`;
+  return `---\ntype: habit\nhabit: true\nname: ${JSON.stringify(name)}\nfrequency: ${frequency || 'daily'}\ncolor: ${color}\ncompleted: []\n---\n\n# ${name}\n\nA small practice, repeated with care.\n`;
 }
 
 async function handleListHabits() {
@@ -2411,8 +2420,9 @@ async function handleCreateProtocolItem(name, category, timing, frequency, descr
 async function handleCreateHabit(name, frequency, color = '#35ce2b') {
   const config = await readConfig();
   ensureConfigured(config);
-  const clean = name.trim().replace(/[\r\n]+/g, ' ').replace(/[\\/:*?"<>|]/g, '-').replace(/\s+/g, ' ');
+  const clean = cleanHabitName(name);
   if (!clean) throw new Error('Give your habit a name.');
+  if (!HABIT_FREQUENCIES.includes(frequency)) throw new Error('Choose a valid habit frequency.');
   const folder = path.join(config.vaultPath, safeRelative(config.habitsFolder, ''));
   await fs.mkdir(folder, { recursive: true });
   let full = path.join(folder, `${clean}.md`);
@@ -2424,6 +2434,38 @@ async function handleCreateHabit(name, frequency, color = '#35ce2b') {
   const normalizedColor = /^#[0-9a-f]{6}$/i.test(String(color)) ? String(color).toLowerCase() : '#35ce2b';
   await fs.writeFile(full, formatHabitFrontmatter(clean, frequency, normalizedColor), 'utf8');
   return { relativePath: path.relative(config.vaultPath, full).split(path.sep).join('/'), name: clean };
+}
+
+const HABIT_FREQUENCIES = ['daily', 'weekdays', 'weekly'];
+
+function cleanHabitName(name) {
+  return String(name || '').trim().replace(/[\r\n]+/g, ' ').replace(/[\\/:*?"<>|]/g, '-').replace(/\s+/g, ' ');
+}
+
+async function handleUpdateHabit(relativePath, updates = {}) {
+  const config = await readConfig();
+  ensureConfigured(config);
+  const full = path.resolve(config.vaultPath, String(relativePath || '').split('/').join(path.sep));
+  const relative = path.relative(config.vaultPath, full);
+  if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error('That habit is outside the selected vault.');
+  const content = await fs.readFile(full, 'utf8');
+  const frontmatter = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!frontmatter || !isHabitFrontmatter(frontmatter[1])) throw new Error('This note is no longer marked as a habit.');
+  const name = cleanHabitName(updates.name);
+  const frequency = String(updates.frequency || '');
+  const color = String(updates.color || '').toLowerCase();
+  if (!name) throw new Error('Give your habit a name.');
+  if (!HABIT_FREQUENCIES.includes(frequency)) throw new Error('Choose a valid habit frequency.');
+  if (!/^#[0-9a-f]{6}$/.test(color)) throw new Error('Choose a valid habit color.');
+  let meta = frontmatter[1];
+  for (const [key, value] of [['name', JSON.stringify(name)], ['frequency', frequency], ['color', color]]) {
+    const property = new RegExp(`^${key}:.*$`, 'mi');
+    meta = property.test(meta) ? meta.replace(property, `${key}: ${value}`) : `${meta.trimEnd()}\n${key}: ${value}`;
+  }
+  let updated = content.replace(frontmatter[1], meta);
+  updated = /^#\s+.*$/m.test(updated) ? updated.replace(/^#\s+.*$/m, `# ${name}`) : `${updated.trimEnd()}\n\n# ${name}\n`;
+  await fs.writeFile(full, updated, 'utf8');
+  return { relativePath: relative.split(path.sep).join('/'), name, frequency, color };
 }
 
 async function handleSetHabitColor(relativePath, color) {
@@ -2972,6 +3014,7 @@ function registerIpc() {
   ipcMain.handle('protocol:create', (_event, name, category, timing, frequency, description, date) => handleCreateProtocolItem(name, category, timing, frequency, description, date));
   ipcMain.handle('habits:toggle', (_event, file, date) => handleToggleHabit(file, date));
   ipcMain.handle('habits:create', (_event, name, frequency, color) => handleCreateHabit(name, frequency, color));
+  ipcMain.handle('habits:update', (_event, file, updates) => handleUpdateHabit(file, updates));
   ipcMain.handle('habits:color', (_event, file, color) => handleSetHabitColor(file, color));
   ipcMain.handle('todoist:filters', handleGetTodoistFilters);
   ipcMain.handle('todoist:list', handleGetTasks);

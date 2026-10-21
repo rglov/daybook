@@ -41,6 +41,7 @@ contextBridge.exposeInMainWorld('daybook', {
   saveHabitCommitment: (commitment) => ipcRenderer.invoke('habits:commitments:save', commitment),
   toggleHabit: (file, date) => ipcRenderer.invoke('habits:toggle', file, date),
   createHabit: (name, frequency, color) => ipcRenderer.invoke('habits:create', name, frequency, color),
+  updateHabit: (file, updates) => ipcRenderer.invoke('habits:update', file, updates),
   setHabitColor: (file, color) => ipcRenderer.invoke('habits:color', file, color),
   listProtocol: (date) => ipcRenderer.invoke('protocol:list', date),
   listCommittedProtocol: (date) => ipcRenderer.invoke('protocol:committed:list', date),
